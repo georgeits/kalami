@@ -25,6 +25,7 @@ const state = {
   route: "landing",
   authMode: "signup",
   dashboardTab: "library",
+  currentView: "authors-main",
   selectedAuthorId: null,
   selectedWorkId: null,
   paywallOpen: false,
@@ -85,6 +86,7 @@ const slugify = (value) =>
 
 const normalizeWork = (work) => ({
   ...work,
+  title: work.title || "",
   summary: work.summary || "",
   characters: work.characters || "",
   structure: work.structure || "",
@@ -92,18 +94,89 @@ const normalizeWork = (work) => ({
   context: work.context || work.questions || "",
 });
 
-const normalizeLibrary = (library) =>
-  library.map((section) => ({
-    ...section,
-    authors: (section.authors || []).map((author) => ({
-      ...author,
-      era: author.era || section.category,
-      bio: author.bio || "",
-      works: (author.works || []).map(normalizeWork),
-    })),
-  }));
+const normalizeWorkMap = (works) => {
+  if (!works) return {};
+  if (Array.isArray(works)) {
+    return Object.fromEntries(
+      works.map((work) => [
+        work.id || slugify(`${work.title || "work"}-${Date.now()}`),
+        {
+          title: work.title || "",
+          chapters: work.summary
+            ? {
+                summary: {
+                  title: "შინაარსი",
+                  content: work.summary,
+                },
+              }
+            : {},
+          characters: typeof work.characters === "string"
+            ? {
+                default: {
+                  name: "პერსონაჟები",
+                  description: work.characters,
+                },
+              }
+            : work.characters || {},
+          structure: work.structure || "",
+          questions: work.questions || work.context || "",
+        },
+      ])
+    );
+  }
 
-const getDefaultLibrary = () => normalizeLibrary(clone(curriculumData));
+  return Object.fromEntries(
+    Object.entries(works).map(([workId, work]) => [
+      workId,
+      {
+        title: work.title || "",
+        chapters: work.chapters || {},
+        characters: work.characters || {},
+        structure: work.structure || "",
+        questions: work.questions || "",
+      },
+    ])
+  );
+};
+
+const normalizeAuthorsMap = (payload) => {
+  if (!payload) return {};
+
+  if (payload.authors && !Array.isArray(payload.authors)) {
+    return Object.fromEntries(
+      Object.entries(payload.authors).map(([authorId, author]) => [
+        authorId,
+        {
+          name: author.name || "",
+          bio: author.bio || "",
+          image: author.image || author.portrait || "",
+          era: author.era || "",
+          works: normalizeWorkMap(author.works),
+        },
+      ])
+    );
+  }
+
+  if (Array.isArray(payload)) {
+    const authors = payload.flatMap((section) =>
+      (section.authors || []).map((author) => [
+        author.id || slugify(author.name),
+        {
+          name: author.name || "",
+          bio: author.bio || "",
+          image: author.image || author.portrait || "",
+          era: author.era || section.category || "",
+          works: normalizeWorkMap(author.works),
+        },
+      ])
+    );
+    return Object.fromEntries(authors);
+  }
+
+  return {};
+};
+
+const getDefaultAuthorsMap = () => normalizeAuthorsMap(clone(curriculumData));
 
 const getUserRef = (userId) => (usersRootRef && userId ? usersRootRef.child(String(userId)) : null);
 const getPendingPaymentRef = (userId) =>
@@ -183,7 +256,7 @@ const attachRole = (user, enableAdminHook = false) => ({
 const initState = () => {
   state.users = getData(STORAGE_KEYS.users, []);
   state.pendingPayments = [];
-  state.library = [];
+  state.library = getDefaultAuthorsMap();
   refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
   state.currentUser = existingUser ? attachRole(existingUser, true) : null;
@@ -200,11 +273,8 @@ const persistUsers = () => {
 };
 
 const findAuthorById = (authorId) => {
-  for (const section of state.library) {
-    const author = section.authors.find((item) => item.id === authorId);
-    if (author) return { section, author };
-  }
-  return null;
+  const author = state.library?.[authorId];
+  return author ? { authorId, author } : null;
 };
 
 const getSelectedAuthor = () => {
@@ -215,7 +285,8 @@ const getSelectedAuthor = () => {
 const getSelectedWork = () => {
   const author = getSelectedAuthor();
   if (!author || !state.selectedWorkId) return null;
-  return author.works.find((work) => work.id === state.selectedWorkId) || null;
+  const work = author.works?.[state.selectedWorkId];
+  return work ? { id: state.selectedWorkId, ...work } : null;
 };
 
 const closeAdminModalState = () => {
@@ -249,6 +320,35 @@ const writeCurriculumToCloud = async (nextLibrary) => {
   await curriculumRef.set(nextLibrary);
 };
 
+const getAuthorRef = (authorId) => (curriculumRef && authorId ? curriculumRef.child(`authors/${authorId}`) : null);
+const getWorkRef = (authorId, workId) =>
+  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}`) : null;
+const getChaptersRef = (authorId, workId) =>
+  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}/chapters`) : null;
+const getCharactersRef = (authorId, workId) =>
+  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}/characters`) : null;
+
+const openAuthorsDirectory = () => {
+  state.currentView = "authors-main";
+  state.selectedAuthorId = null;
+  state.selectedWorkId = null;
+  render();
+};
+
+const openAuthorDetail = (authorId) => {
+  state.currentView = "author-detail";
+  state.selectedAuthorId = authorId;
+  state.selectedWorkId = null;
+  render();
+};
+
+const openWorkEditor = (authorId, workId) => {
+  state.currentView = "work-editor";
+  state.selectedAuthorId = authorId;
+  state.selectedWorkId = workId;
+  render();
+};
+
 const subscribeToCurriculum = () => {
   if (!curriculumRef) {
     state.curriculumLoading = false;
@@ -262,10 +362,10 @@ const subscribeToCurriculum = () => {
     (snapshot) => {
       const remoteValue = snapshot.val();
       if (!remoteValue) {
-        state.library = [];
+        state.library = {};
         state.curriculumError = "";
       } else {
-        state.library = normalizeLibrary(remoteValue);
+        state.library = normalizeAuthorsMap(remoteValue);
         state.curriculumError = "";
       }
       state.curriculumLoading = false;
@@ -596,15 +696,49 @@ const previewReceipt = (paymentId) => {
   render();
 };
 
+const addNewChapter = async (event) => {
+  event.preventDefault();
+  const authorId = state.selectedAuthorId;
+  const workId = state.selectedWorkId;
+  const title = event.currentTarget.chapterTitle.value.trim();
+  const content = event.currentTarget.chapterContent.value.trim();
+  if (!authorId || !workId || !title || !content) return;
+
+  const chapterId = `${slugify(title) || "chapter"}-${Date.now()}`;
+  try {
+    await getChaptersRef(authorId, workId).child(chapterId).set({ title, content });
+    event.currentTarget.reset();
+    alert("ახალი თავი დამატებულია.");
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "თავის დამატება ვერ მოხერხდა."));
+  }
+};
+
+const addNewCharacter = async (event) => {
+  event.preventDefault();
+  const authorId = state.selectedAuthorId;
+  const workId = state.selectedWorkId;
+  const name = event.currentTarget.characterName.value.trim();
+  const description = event.currentTarget.characterDescription.value.trim();
+  if (!authorId || !workId || !name || !description) return;
+
+  const characterId = `${slugify(name) || "character"}-${Date.now()}`;
+  try {
+    await getCharactersRef(authorId, workId).child(characterId).set({ name, description });
+    event.currentTarget.reset();
+    alert("პერსონაჟი დამატებულია.");
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "პერსონაჟის დამატება ვერ მოხერხდა."));
+  }
+};
+
 const saveAuthor = async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const editorData = state.editAuthorId ? getSelectedEditorData() : null;
-  const categoryId = form.categoryId?.value || editorData?.section?.id;
   const name = form.name.value.trim();
   const era = form.era.value.trim();
   const bio = form.bio.value.trim();
-  const portrait = form.dataset.base64 || form.portraitUrl.value.trim();
+  const image = form.dataset.base64 || form.portraitUrl.value.trim();
   const authorId = state.editAuthorId || `${slugify(name) || "author"}-${Date.now()}`;
 
   if (!name || !era || !bio) {
@@ -612,47 +746,18 @@ const saveAuthor = async (event) => {
     return;
   }
 
-  if (!state.editAuthorId && !categoryId) {
-    alert("გთხოვთ აირჩიოთ კატეგორია.");
-    return;
-  }
-
-  if (state.editAuthorId) {
-    state.library = state.library.map((section) => ({
-      ...section,
-      authors: section.authors.map((author) => {
-        if (author.id !== state.editAuthorId) return author;
-        return { ...author, name, era, bio, portrait };
-      }),
-    }));
-  } else {
-    state.library = state.library.map((section) =>
-      section.id !== categoryId
-        ? section
-        : {
-            ...section,
-            authors: [
-              ...section.authors,
-              {
-                id: authorId,
-                name,
-                era,
-                bio,
-                portrait,
-                works: [],
-              },
-            ],
-          }
-    );
-    state.selectedAuthorId = authorId;
-    state.selectedWorkId = null;
-  }
-
   try {
-    await writeCurriculumToCloud(state.library);
+    const existingWorks = state.library?.[authorId]?.works || {};
+    await getAuthorRef(authorId).set({
+      name,
+      bio,
+      image,
+      era,
+      works: existingWorks,
+    });
     closeAdminModalState();
+    openAuthorDetail(authorId);
     alert("ავტორი წარმატებით შენახულია.");
-    render();
   } catch (error) {
     alert(getFirebaseErrorMessage(error, "ავტორის შენახვა Firebase-ში ვერ მოხერხდა."));
   }
@@ -665,51 +770,24 @@ const saveWork = async (event) => {
   if (!authorId) return;
 
   const title = form.title.value.trim();
-  const summary = form.summary.value.trim();
-  const characters = form.characters.value.trim();
-  const structure = form.structure.value.trim();
-  const questions = form.questions.value.trim();
-  const action = event.submitter?.dataset.action || "draft";
-
   if (!title) {
     alert("გთხოვთ შეავსოთ ნაწარმოების სათაური.");
     return;
   }
 
   const workId = state.editWorkId || `${slugify(title) || "work"}-${Date.now()}`;
-  const nextWork = normalizeWork({
-    id: workId,
-    title,
-    summary,
-    characters,
-    structure,
-    questions,
-    context: questions,
-    visibility: action === "publish" ? "published" : "draft",
-    updatedAt: Date.now(),
-  });
-
-  state.library = state.library.map((section) => ({
-    ...section,
-    authors: section.authors.map((author) => {
-      if (author.id !== authorId) return author;
-      const existingIndex = author.works.findIndex((work) => work.id === workId);
-      if (existingIndex === -1) {
-        return { ...author, works: [...author.works, nextWork] };
-      }
-      const works = [...author.works];
-      works[existingIndex] = { ...works[existingIndex], ...nextWork };
-      return { ...author, works };
-    }),
-  }));
-
-  state.selectedAuthorId = authorId;
-  state.selectedWorkId = workId;
   try {
-    await writeCurriculumToCloud(state.library);
+    const existingWork = state.library?.[authorId]?.works?.[workId] || {};
+    await getWorkRef(authorId, workId).set({
+      title,
+      chapters: existingWork.chapters || {},
+      characters: existingWork.characters || {},
+      structure: existingWork.structure || "",
+      questions: existingWork.questions || "",
+    });
     closeAdminModalState();
-    alert(action === "publish" ? "ნაწარმოები გამოქვეყნდა." : "ნაწარმოები შენახულია.");
-    render();
+    openWorkEditor(authorId, workId);
+    alert("ნაწარმოები შენახულია.");
   } catch (error) {
     alert(getFirebaseErrorMessage(error, "ნაწარმოების შენახვა Firebase-ში ვერ მოხერხდა."));
   }
@@ -836,197 +914,23 @@ const landingMarkup = () => `
   </section>
 `;
 
-const renderLibraryGrid = () =>
-  state.library
-    .map(
-      (section) => `
-        <section class="library-section">
-          <div class="section-head">
-            <div>
-              <span class="section-tag">${section.category}</span>
-              <h3>${section.category}</h3>
-            </div>
-            <div class="section-actions">
-              <span class="section-count">${section.authors.length} ავტორი</span>
-              ${
-                isAdmin()
-                  ? `<button class="add-inline-btn" data-add-author="${section.id}" aria-label="ახალი ავტორი">+</button>`
-                  : ""
-              }
-            </div>
-          </div>
-          <div class="author-grid">
-            ${section.authors
-              .map(
-                (author) => `
-                <article class="author-card">
-                  <div class="author-top">
-                    <div class="avatar-wrap">
-                      ${
-                        author.portrait
-                          ? `<img src="${author.portrait}" alt="${author.name}" class="avatar-img" />`
-                          : `<div class="avatar-fallback">${author.name.charAt(0)}</div>`
-                      }
-                    </div>
-                    <div>
-                      <h4>${author.name}</h4>
-                      <p>${author.era || section.category}</p>
-                    </div>
-                  </div>
-                  <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
-                  <div class="work-list">
-                    ${author.works
-                      .map(
-                        (work) => `
-                          <button class="work-chip" data-author="${author.id}" data-work="${work.id}">
-                            ${work.title}
-                          </button>
-                        `
-                      )
-                      .join("")}
-                  </div>
-                  ${
-                    isAdmin()
-                      ? `<button class="secondary-btn edit-author-btn" data-edit-author="${author.id}">რედაქტირება</button>`
-                      : ""
-                  }
-                </article>
-              `
-              )
-              .join("")}
-          </div>
-        </section>
-      `
-    )
-    .join("");
+const getAuthorsArray = () =>
+  Object.entries(state.library || {}).map(([id, author]) => ({
+    id,
+    ...author,
+    works: author.works || {},
+  }));
 
-const renderWorkPanel = () => {
-  const authorData = state.selectedAuthorId ? findAuthorById(state.selectedAuthorId) : null;
-  const author = authorData?.author || null;
-  const section = authorData?.section || null;
-  const work = getSelectedWork();
-
-  if (!author) {
-    return `
-      <aside class="detail-panel empty-state">
-        <h3>შეარჩიე ნაწარმოები</h3>
-        <p>ბიბლიოთეკიდან დააჭირე ნებისმიერ ტექსტს და აქ გაიხსნება მისი ანალიტიკური ბარათი.</p>
-      </aside>
-    `;
-  }
-
-  if (!work) {
-    return `
-      <aside class="detail-panel">
-        <div class="detail-header admin-detail-head">
-          <div>
-            <span class="section-tag">${section?.category || "ავტორი"}</span>
-            <h3>${author.name}</h3>
-            <p class="detail-subtitle">${author.era || section?.category || ""}</p>
-          </div>
-          ${
-            isAdmin()
-              ? `<button class="accent-btn" data-add-work="${author.id}">+ ახალი ნაწარმოების დამატება</button>`
-              : ""
-          }
-        </div>
-        <div class="detail-block">
-          <h4>ნაწარმოებების სია</h4>
-          <p>აირჩიე უკვე დამატებული ტექსტი ან დაამატე ახალი ნაწარმოები ადმინისტრაციული პანელიდან.</p>
-          <div class="work-list">
-            ${author.works
-              .map(
-                (item) => `
-                  <button class="work-chip" data-author="${author.id}" data-work="${item.id}">
-                    ${item.title}
-                  </button>
-                `
-              )
-              .join("")}
-          </div>
-        </div>
-      </aside>
-    `;
-  }
-
+const renderAuthorsMainDirectory = () => {
+  const authors = getAuthorsArray();
   return `
-    <aside class="detail-panel ${!isPremium() ? "blurred" : ""}">
-      <div class="detail-header admin-detail-head">
-        <div>
-          <span class="section-tag">${author.name}</span>
-          <h3>${work.title}</h3>
-          <p class="detail-subtitle">${author.era || section?.category || ""}</p>
-        </div>
-        <div class="detail-actions">
-          ${
-            isAdmin()
-              ? `<button class="secondary-btn" data-edit-work="${author.id}|${work.id}">რედაქტირება</button>
-                 <button class="accent-btn" data-add-work="${author.id}">+ ახალი ნაწარმოების დამატება</button>`
-              : ""
-          }
-          ${
-            !isPremium()
-              ? `<button class="accent-btn" id="openPaymentFromHeader">💳 ქვითრის ატვირთვა</button>`
-              : ""
-          }
-        </div>
-      </div>
-      <div class="detail-block">
-        <h4>შინაარსი</h4>
-        <p>${work.summary}</p>
-      </div>
-      <div class="detail-block">
-        <h4>პერსონაჟთა დახასიათება</h4>
-        <p>${work.characters}</p>
-      </div>
-      <div class="detail-block">
-        <h4>გეგმა და სტრუქტურა</h4>
-        <p>${work.structure}</p>
-      </div>
-      <div class="detail-block">
-        <h4>გასაანალიზებელი კითხვები</h4>
-        <p>${work.questions || work.context}</p>
-      </div>
-      ${
-        state.paywallOpen && !isPremium()
-          ? `
-            <div class="paywall-overlay">
-              <div class="paywall-card">
-                <span class="premium-lock">Premium</span>
-                <h4>სრული წვდომა შეზღუდულია</h4>
-                <p>პლატფორმის სრული წვდომისთვის გთხოვთ გადარიცხოთ 5 ლარი მითითებულ ანგარიშზე.</p>
-                <strong>საქართველოს ბანკი (BOG): GE928G0000000612371503</strong>
-                <div class="paywall-actions">
-                  <button class="primary-btn" id="openPaymentModal">💳 ქვითრის ატვირთვა</button>
-                  <button class="ghost-btn" id="closePaywall">დახურვა</button>
-                </div>
-                ${
-                  isPending()
-                    ? `<small>თქვენი ქვითარი განხილვის პროცესშია.</small>`
-                    : ""
-                }
-              </div>
-            </div>
-          `
-          : ""
-      }
-    </aside>
-  `;
-};
-
-const libraryMarkup = () => `
-  <section class="library-shell">
-    <div class="library-column">
+    <section class="library-shell cms-shell">
       <div class="library-header">
         <div>
-          <span class="eyebrow">ბიბლიოთეკა</span>
-          <h2>2026 ეროვნული პროგრამა</h2>
+          <span class="eyebrow">ადმინ პანელი</span>
+          <h2>ავტორების დირექტორია</h2>
         </div>
-        ${
-          isAdmin()
-            ? `<button class="add-btn" id="openNewAuthorModal" aria-label="ახალი ავტორი">+</button>`
-            : ""
-        }
+        <button class="add-btn" id="openNewAuthorModal" aria-label="ახალი ავტორი">+</button>
       </div>
       ${
         state.curriculumLoading
@@ -1038,10 +942,230 @@ const libraryMarkup = () => `
           ? `<div class="sync-banner error">${state.curriculumError}</div>`
           : ""
       }
-      ${renderLibraryGrid()}
-    </div>
-  </section>
-`;
+      <div class="author-grid cms-author-grid">
+        ${
+          authors.length
+            ? authors
+                .map(
+                  (author) => `
+                    <article class="author-card cms-clickable-card" data-open-author="${author.id}">
+                      <div class="author-top">
+                        <div class="avatar-wrap">
+                          ${
+                            author.image
+                              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
+                              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
+                          }
+                        </div>
+                        <div>
+                          <h4>${author.name || "უცნობი ავტორი"}</h4>
+                          <p>${author.era || "ავტორი"}</p>
+                        </div>
+                      </div>
+                      <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
+                    </article>
+                  `
+                )
+                .join("")
+            : `<div class="empty-payments">ავტორები ჯერ არ არის დამატებული.</div>`
+        }
+      </div>
+    </section>
+  `;
+};
+
+const renderAuthorDetailPage = () => {
+  const author = getSelectedAuthor();
+  if (!author) {
+    return `<section class="library-shell"><div class="empty-payments">ავტორი ვერ მოიძებნა.</div></section>`;
+  }
+
+  const works = Object.entries(author.works || {}).map(([id, work]) => ({ id, ...work }));
+  return `
+    <section class="library-shell cms-shell">
+      <div class="cms-header-row">
+        <button class="secondary-btn" data-back-authors>უკან</button>
+        <button class="accent-btn" data-add-work="${state.selectedAuthorId}">ახალი ნაწარმოების დამატება</button>
+      </div>
+      <article class="cms-author-profile">
+        <div class="avatar-wrap large">
+          ${
+            author.image
+              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
+              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
+          }
+        </div>
+        <div>
+          <h2>${author.name}</h2>
+          <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
+        </div>
+      </article>
+      <section class="cms-works-section">
+        <h3>ნაწარმოებები</h3>
+        <div class="cms-work-grid">
+          ${
+            works.length
+              ? works
+                  .map(
+                    (work) => `
+                      <button class="work-chip" data-open-work="${state.selectedAuthorId}|${work.id}">
+                        ${work.title || "უსათაურო ნაწარმოები"}
+                      </button>
+                    `
+                  )
+                  .join("")
+              : `<div class="empty-payments">ამ ავტორს ჯერ ნაწარმოებები არ აქვს.</div>`
+          }
+        </div>
+      </section>
+    </section>
+  `;
+};
+
+const renderWorkEditorPage = () => {
+  const author = getSelectedAuthor();
+  const work = getSelectedWork();
+  if (!author || !work) {
+    return `<section class="library-shell"><div class="empty-payments">ნაწარმოები ვერ მოიძებნა.</div></section>`;
+  }
+
+  const chapters = Object.entries(work.chapters || {}).map(([id, chapter]) => ({ id, ...chapter }));
+  const characters = Object.entries(work.characters || {}).map(([id, character]) => ({ id, ...character }));
+
+  return `
+    <section class="library-shell cms-shell">
+      <div class="cms-header-row">
+        <button class="secondary-btn" data-back-author>უკან</button>
+      </div>
+      <div class="cms-work-header">
+        <span class="section-tag">${author.name}</span>
+        <h2>${work.title}</h2>
+      </div>
+      <div class="cms-editor-grid">
+        <section class="cms-editor-section">
+          <h3>შინაარსი და თავები</h3>
+          <div class="cms-list-block">
+            ${
+              chapters.length
+                ? chapters
+                    .map(
+                      (chapter) => `
+                        <article class="cms-item-card">
+                          <h4>${chapter.title}</h4>
+                          <p>${chapter.content}</p>
+                        </article>
+                      `
+                    )
+                    .join("")
+                : `<div class="empty-payments">თავები ჯერ არ არის დამატებული.</div>`
+            }
+          </div>
+          <form id="chapterForm" class="stack-form">
+            <label>
+              <span>თავის სათაური</span>
+              <input name="chapterTitle" type="text" required />
+            </label>
+            <label>
+              <span>ტექსტი</span>
+              <textarea name="chapterContent" rows="6" required></textarea>
+            </label>
+            <button type="submit" class="primary-btn">ახალი თავის დამატება</button>
+          </form>
+        </section>
+        <section class="cms-editor-section">
+          <h3>პერსონაჟთა დახასიათება</h3>
+          <div class="cms-list-block">
+            ${
+              characters.length
+                ? characters
+                    .map(
+                      (character) => `
+                        <article class="cms-item-card">
+                          <h4>${character.name}</h4>
+                          <p>${character.description}</p>
+                        </article>
+                      `
+                    )
+                    .join("")
+                : `<div class="empty-payments">პერსონაჟები ჯერ არ არის დამატებული.</div>`
+            }
+          </div>
+          <form id="characterForm" class="stack-form">
+            <label>
+              <span>პერსონაჟის სახელი</span>
+              <input name="characterName" type="text" required />
+            </label>
+            <label>
+              <span>დახასიათება</span>
+              <textarea name="characterDescription" rows="6" required></textarea>
+            </label>
+            <button type="submit" class="primary-btn">პერსონაჟის დამატება</button>
+          </form>
+        </section>
+      </div>
+    </section>
+  `;
+};
+
+const renderStudentLibrary = () => {
+  const authors = getAuthorsArray();
+  return `
+    <section class="library-shell">
+      <div class="library-header">
+        <div>
+          <span class="eyebrow">ბიბლიოთეკა</span>
+          <h2>ავტორები და ნაწარმოებები</h2>
+        </div>
+      </div>
+      <div class="author-grid">
+        ${
+          authors.length
+            ? authors
+                .map(
+                  (author) => `
+                    <article class="author-card">
+                      <div class="author-top">
+                        <div class="avatar-wrap">
+                          ${
+                            author.image
+                              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
+                              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
+                          }
+                        </div>
+                        <div>
+                          <h4>${author.name}</h4>
+                          <p>${author.era || "ავტორი"}</p>
+                        </div>
+                      </div>
+                      <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
+                      <div class="work-list">
+                        ${Object.entries(author.works || {})
+                          .map(
+                            ([workId, work]) => `
+                              <button class="work-chip" data-open-student-work="${author.id}|${workId}">
+                                ${work.title || "უსათაურო ნაწარმოები"}
+                              </button>
+                            `
+                          )
+                          .join("")}
+                      </div>
+                    </article>
+                  `
+                )
+                .join("")
+            : `<div class="empty-payments">ბიბლიოთეკა ცარიელია.</div>`
+        }
+      </div>
+    </section>
+  `;
+};
+
+const libraryMarkup = () => {
+  if (!isAdmin()) return renderStudentLibrary();
+  if (state.currentView === "author-detail") return renderAuthorDetailPage();
+  if (state.currentView === "work-editor") return renderWorkEditorPage();
+  return renderAuthorsMainDirectory();
+};
 
 const profileMarkup = () => `
   <section class="profile-shell">
@@ -1168,13 +1292,13 @@ const adminModalMarkup = () => {
   const selected = state.editAuthorId ? getSelectedEditorData() : null;
   const selectedWork =
     state.editAuthorId && state.editWorkId
-      ? selected?.author.works.find((work) => work.id === state.editWorkId) || null
+      ? selected?.author.works?.[state.editWorkId] || null
       : null;
 
   if (state.adminModalMode === "work") {
     return `
       <div class="modal-backdrop">
-        <div class="modal-card large">
+        <div class="modal-card">
           <div class="modal-head">
             <div>
               <span class="section-tag">${state.editWorkId ? "რედაქტირება" : "ახალი ტექსტი"}</span>
@@ -1187,26 +1311,7 @@ const adminModalMarkup = () => {
               <span>ნაწარმოების სათაური</span>
               <input name="title" type="text" value="${selectedWork?.title || ""}" required />
             </label>
-            <label>
-              <span>შინაარსი</span>
-              <textarea name="summary" rows="4">${selectedWork?.summary || ""}</textarea>
-            </label>
-            <label>
-              <span>პერსონაჟთა დახასიათება</span>
-              <textarea name="characters" rows="4">${selectedWork?.characters || ""}</textarea>
-            </label>
-            <label>
-              <span>გეგმა და სტრუქტურა</span>
-              <textarea name="structure" rows="4">${selectedWork?.structure || ""}</textarea>
-            </label>
-            <label>
-              <span>გასაანალიზებელი კითხვები</span>
-              <textarea name="questions" rows="4">${selectedWork?.questions || selectedWork?.context || ""}</textarea>
-            </label>
-            <div class="modal-action-row">
-              <button type="submit" class="secondary-btn" data-action="draft">შენახვა</button>
-              <button type="submit" class="primary-btn" data-action="publish">გამოქვეყნება</button>
-            </div>
+            <button type="submit" class="primary-btn">შენახვა</button>
           </form>
         </div>
       </div>
@@ -1224,31 +1329,13 @@ const adminModalMarkup = () => {
           <button class="icon-button" id="closeAdminModal">✕</button>
         </div>
         <form id="authorForm" class="stack-form">
-          ${
-            state.editAuthorId
-              ? ""
-              : `
-                <label>
-                  <span>კატეგორია</span>
-                  <select name="categoryId">
-                    ${state.library
-                      .map(
-                        (section) => `
-                          <option value="${section.id}" ${selected?.section.id === section.id ? "selected" : ""}>${section.category}</option>
-                        `
-                      )
-                      .join("")}
-                  </select>
-                </label>
-              `
-          }
           <label>
             <span>ავტორის სახელი და გვარი</span>
             <input name="name" type="text" value="${selected?.author.name || ""}" required />
           </label>
           <label>
             <span>ეპოქა</span>
-            <input name="era" type="text" value="${selected?.author.era || selected?.section.category || ""}" required />
+            <input name="era" type="text" value="${selected?.author.era || ""}" required />
           </label>
           <label>
             <span>ბიოგრაფია</span>
@@ -1344,8 +1431,30 @@ const bindEvents = () => {
   const logoutBtn = document.querySelector("#logoutBtn");
   if (logoutBtn) logoutBtn.addEventListener("click", signOut);
 
-  document.querySelectorAll(".work-chip").forEach((button) => {
-    button.addEventListener("click", () => openWork(button.dataset.author, button.dataset.work));
+  document.querySelectorAll("[data-open-author]").forEach((button) => {
+    button.addEventListener("click", () => openAuthorDetail(button.dataset.openAuthor));
+  });
+
+  document.querySelectorAll("[data-open-work]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [authorId, workId] = button.dataset.openWork.split("|");
+      openWorkEditor(authorId, workId);
+    });
+  });
+
+  document.querySelectorAll("[data-open-student-work]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [authorId, workId] = button.dataset.openStudentWork.split("|");
+      openWork(authorId, workId);
+    });
+  });
+
+  document.querySelectorAll("[data-back-authors]").forEach((button) => {
+    button.addEventListener("click", openAuthorsDirectory);
+  });
+
+  document.querySelectorAll("[data-back-author]").forEach((button) => {
+    button.addEventListener("click", () => openAuthorDetail(state.selectedAuthorId));
   });
 
   const closePaywall = document.querySelector("#closePaywall");
@@ -1415,33 +1524,12 @@ const bindEvents = () => {
   const openNewAuthorModal = document.querySelector("#openNewAuthorModal");
   if (openNewAuthorModal) openNewAuthorModal.addEventListener("click", () => openAdminEditor("author"));
 
-  document.querySelectorAll("[data-add-author]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const sectionId = button.dataset.addAuthor;
-      state.selectedAuthorId = null;
-      state.selectedWorkId = null;
-      state.editAuthorId = null;
-      state.adminModalMode = "author";
-      state.adminModalOpen = true;
-      render();
-      const categoryField = document.querySelector('#authorForm select[name="categoryId"]');
-      if (categoryField && sectionId) categoryField.value = sectionId;
-    });
-  });
-
   document.querySelectorAll("[data-edit-author]").forEach((button) => {
     button.addEventListener("click", () => openAdminEditor("author", button.dataset.editAuthor));
   });
 
   document.querySelectorAll("[data-add-work]").forEach((button) => {
     button.addEventListener("click", () => openAdminEditor("work", button.dataset.addWork));
-  });
-
-  document.querySelectorAll("[data-edit-work]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const [authorId, workId] = button.dataset.editWork.split("|");
-      openAdminEditor("work", authorId, workId);
-    });
   });
 
   document.querySelectorAll("[data-preview-receipt]").forEach((button) => {
@@ -1465,6 +1553,12 @@ const bindEvents = () => {
 
   const workForm = document.querySelector("#workForm");
   if (workForm) workForm.addEventListener("submit", saveWork);
+
+  const chapterForm = document.querySelector("#chapterForm");
+  if (chapterForm) chapterForm.addEventListener("submit", addNewChapter);
+
+  const characterForm = document.querySelector("#characterForm");
+  if (characterForm) characterForm.addEventListener("submit", addNewCharacter);
 
   const closeReceiptPreviewBtn = document.querySelector("#closeReceiptPreview");
   if (closeReceiptPreviewBtn) closeReceiptPreviewBtn.addEventListener("click", () => {
