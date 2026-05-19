@@ -1,13 +1,15 @@
 import { curriculumData, defaultUserStatus } from "./data.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, onValue, ref, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const STORAGE_KEYS = {
   users: "users",
   currentUser: "currentUser",
-  pendingPayments: "pendingPayments",
 };
 
 const ADMIN_EMAIL = "giorgijavakhishvili75@gmail.com";
-const FIREBASE_CURRICULUM_PATH = "/curriculum";
+const FIREBASE_CURRICULUM_PATH = "curriculum";
+const FIREBASE_PENDING_PAYMENTS_PATH = "pendingPayments";
 const firebaseConfig = {
   apiKey: "AIzaSyDfHIssC0SbMkaADtLE64Y28DbjWzLoiJU",
   authDomain: "kalami-fe323.firebaseapp.com",
@@ -15,7 +17,7 @@ const firebaseConfig = {
   projectId: "kalami-fe323",
   storageBucket: "kalami-fe323.firebasestorage.app",
   messagingSenderId: "1831718779",
-  appId: "1:1831718779:web:d15a1ca6d0a4ee1a0577de",
+  appId: "1:1831718779:web:d15a1ca6d0a4ae1a0577de",
   measurementId: "G-NFKNZX6K6S",
 };
 
@@ -39,15 +41,14 @@ const state = {
   library: [],
   curriculumLoading: true,
   curriculumError: "",
+  paymentsError: "",
 };
 
 const app = document.querySelector("#app");
-const firebaseNamespace = window.firebase;
-const firebaseApp = firebaseNamespace?.apps?.length
-  ? firebaseNamespace.app()
-  : firebaseNamespace?.initializeApp(firebaseConfig);
-const realtimeDb = firebaseApp ? firebaseNamespace.database(firebaseApp) : null;
-const curriculumRef = realtimeDb ? realtimeDb.ref(FIREBASE_CURRICULUM_PATH) : null;
+const firebaseApp = initializeApp(firebaseConfig);
+const realtimeDb = getDatabase(firebaseApp);
+const curriculumRef = ref(realtimeDb, FIREBASE_CURRICULUM_PATH);
+const pendingPaymentsRef = ref(realtimeDb, FIREBASE_PENDING_PAYMENTS_PATH);
 
 const getData = (key, fallback) => {
   try {
@@ -110,7 +111,7 @@ const attachRole = (user, enableAdminHook = false) => ({
 
 const initState = () => {
   state.users = getData(STORAGE_KEYS.users, []);
-  state.pendingPayments = getData(STORAGE_KEYS.pendingPayments, []);
+  state.pendingPayments = [];
   state.library = getDefaultLibrary();
   refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
@@ -125,8 +126,6 @@ const persistUsers = () => {
   setData(STORAGE_KEYS.users, state.users);
   syncSessionUser();
 };
-
-const persistPayments = () => setData(STORAGE_KEYS.pendingPayments, state.pendingPayments);
 
 const findAuthorById = (authorId) => {
   for (const section of state.library) {
@@ -158,12 +157,31 @@ const closeReceiptPreview = () => {
   state.receiptPreview = null;
 };
 
+const getFirebaseErrorMessage = (error, fallback) => {
+  const code = error?.code ? ` (${error.code})` : "";
+  const message = error?.message || fallback;
+  return `${message}${code}`;
+};
+
+const normalizePendingPayments = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return Object.values(value).filter(Boolean);
+};
+
 const writeCurriculumToCloud = async (nextLibrary) => {
   if (!curriculumRef) {
     state.curriculumError = "Firebase კავშირი ვერ დამყარდა.";
     throw new Error("Firebase database is not available.");
   }
-  await curriculumRef.set(nextLibrary);
+  await set(curriculumRef, nextLibrary);
+};
+
+const writePendingPaymentsToCloud = async (nextPayments) => {
+  const payload = Object.fromEntries(
+    nextPayments.map((payment) => [String(payment.id), payment])
+  );
+  await set(pendingPaymentsRef, payload);
 };
 
 const subscribeToCurriculum = () => {
@@ -174,20 +192,13 @@ const subscribeToCurriculum = () => {
     return;
   }
 
-  curriculumRef.on(
-    "value",
-    async (snapshot) => {
+  onValue(
+    curriculumRef,
+    (snapshot) => {
       const remoteValue = snapshot.val();
       if (!remoteValue) {
-        const seededLibrary = getDefaultLibrary();
-        try {
-          await curriculumRef.set(seededLibrary);
-          state.library = seededLibrary;
-          state.curriculumError = "";
-        } catch {
-          state.library = seededLibrary;
-          state.curriculumError = "საწყისი ბიბლიოთეკის ატვირთვა ვერ მოხერხდა.";
-        }
+        state.library = getDefaultLibrary();
+        state.curriculumError = "";
       } else {
         state.library = normalizeLibrary(remoteValue);
         state.curriculumError = "";
@@ -195,9 +206,32 @@ const subscribeToCurriculum = () => {
       state.curriculumLoading = false;
       render();
     },
-    () => {
+    (error) => {
       state.curriculumLoading = false;
-      state.curriculumError = "ბიბლიოთეკის სინქრონიზაცია ვერ მოხერხდა.";
+      state.curriculumError = getFirebaseErrorMessage(
+        error,
+        "ბიბლიოთეკის სინქრონიზაცია ვერ მოხერხდა."
+      );
+      render();
+    }
+  );
+};
+
+const subscribeToPendingPayments = () => {
+  onValue(
+    pendingPaymentsRef,
+    (snapshot) => {
+      const remoteValue = snapshot.val();
+      state.pendingPayments = normalizePendingPayments(remoteValue);
+      state.paymentsError = "";
+      render();
+    },
+    (error) => {
+      state.pendingPayments = [];
+      state.paymentsError = getFirebaseErrorMessage(
+        error,
+        "გადახდების სინქრონიზაცია ვერ მოხერხდა."
+      );
       render();
     }
   );
@@ -363,7 +397,7 @@ const openWork = (authorId, workId) => {
   render();
 };
 
-const submitPayment = (event) => {
+const submitPayment = async (event) => {
   event.preventDefault();
   if (!state.currentUser) return;
 
@@ -390,14 +424,19 @@ const submitPayment = (event) => {
     status: "pending",
   };
 
-  state.pendingPayments.push(packet);
-  persistPayments();
-  updateCurrentUserStatus("pending");
-  alert("ქვითარი წარმატებით გაიგზავნა.");
-  state.paymentOpen = false;
-  state.selectedPlan = null;
-  state.paywallOpen = true;
-  render();
+  try {
+    await writePendingPaymentsToCloud([...state.pendingPayments, packet]);
+    state.paymentsError = "";
+    updateCurrentUserStatus("pending");
+    alert("ქვითარი წარმატებით გაიგზავნა.");
+    state.paymentOpen = false;
+    state.selectedPlan = null;
+    state.paywallOpen = true;
+    render();
+  } catch (error) {
+    state.paymentsError = getFirebaseErrorMessage(error, "ქვითრის გაგზავნა ვერ მოხერხდა.");
+    alert(getFirebaseErrorMessage(error, "ქვითრის გაგზავნა ვერ მოხერხდა."));
+  }
 };
 
 const handleFileChange = (input, form) => {
@@ -412,7 +451,7 @@ const handleFileChange = (input, form) => {
   reader.readAsDataURL(file);
 };
 
-const approvePayment = (paymentId, nextStatus) => {
+const approvePayment = async (paymentId, nextStatus) => {
   const request = state.pendingPayments.find((item) => item.id === paymentId);
   if (!request) return;
 
@@ -440,17 +479,23 @@ const approvePayment = (paymentId, nextStatus) => {
     };
   });
 
-  state.pendingPayments = state.pendingPayments.filter((item) => item.id !== paymentId);
-  persistPayments();
-  persistUsers();
-  closeReceiptPreview();
+  const nextPendingPayments = state.pendingPayments.filter((item) => item.id !== paymentId);
 
-  alert(
-    nextStatus === "premium"
-      ? "მომხმარებელი წარმატებით გააქტიურდა."
-      : "ქვითარი უარყოფილია და სტატუსი განულდა."
-  );
-  render();
+  try {
+    await writePendingPaymentsToCloud(nextPendingPayments);
+    state.paymentsError = "";
+    persistUsers();
+    closeReceiptPreview();
+    alert(
+      nextStatus === "premium"
+        ? "მომხმარებელი წარმატებით გააქტიურდა."
+        : "ქვითარი უარყოფილია და სტატუსი განულდა."
+    );
+    render();
+  } catch (error) {
+    state.paymentsError = getFirebaseErrorMessage(error, "გადახდის განახლება ვერ მოხერხდა.");
+    alert(getFirebaseErrorMessage(error, "გადახდის განახლება ვერ მოხერხდა."));
+  }
 };
 
 const previewReceipt = (paymentId) => {
@@ -517,8 +562,8 @@ const saveAuthor = async (event) => {
     closeAdminModalState();
     alert("ავტორი წარმატებით შენახულია.");
     render();
-  } catch {
-    alert("ავტორის შენახვა Firebase-ში ვერ მოხერხდა.");
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "ავტორის შენახვა Firebase-ში ვერ მოხერხდა."));
   }
 };
 
@@ -574,8 +619,8 @@ const saveWork = async (event) => {
     closeAdminModalState();
     alert(action === "publish" ? "ნაწარმოები გამოქვეყნდა." : "ნაწარმოები შენახულია.");
     render();
-  } catch {
-    alert("ნაწარმოების შენახვა Firebase-ში ვერ მოხერხდა.");
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "ნაწარმოების შენახვა Firebase-ში ვერ მოხერხდა."));
   }
 };
 
@@ -949,6 +994,11 @@ const paymentsMarkup = () => `
     </div>
     <div class="payments-section">
       <h3>მოსული გადახდების გადამოწმება</h3>
+      ${
+        state.paymentsError
+          ? `<div class="sync-banner error">${state.paymentsError}</div>`
+          : ""
+      }
       <div class="payments-table-wrap">
       ${
         pendingRequests.length
@@ -1335,3 +1385,4 @@ const bindEvents = () => {
 initState();
 render();
 subscribeToCurriculum();
+subscribeToPendingPayments();
