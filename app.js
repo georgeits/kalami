@@ -4,10 +4,20 @@ const STORAGE_KEYS = {
   users: "users",
   currentUser: "currentUser",
   pendingPayments: "pendingPayments",
-  library: "kalamiLibrary",
 };
 
 const ADMIN_EMAIL = "giorgijavakhishvili75@gmail.com";
+const FIREBASE_CURRICULUM_PATH = "/curriculum";
+const firebaseConfig = {
+  apiKey: "AIzaSyDfHIssC0SbMkaADtLE64Y28DbjWzLoiJU",
+  authDomain: "kalami-fe323.firebaseapp.com",
+  databaseURL: "https://kalami-fe323-default-rtdb.firebaseio.com",
+  projectId: "kalami-fe323",
+  storageBucket: "kalami-fe323.firebasestorage.app",
+  messagingSenderId: "1831718779",
+  appId: "1:1831718779:web:d15a1ca6d0a4ee1a0577de",
+  measurementId: "G-NFKNZX6K6S",
+};
 
 const state = {
   route: "landing",
@@ -27,9 +37,17 @@ const state = {
   currentUser: null,
   pendingPayments: [],
   library: [],
+  curriculumLoading: true,
+  curriculumError: "",
 };
 
 const app = document.querySelector("#app");
+const firebaseNamespace = window.firebase;
+const firebaseApp = firebaseNamespace?.apps?.length
+  ? firebaseNamespace.app()
+  : firebaseNamespace?.initializeApp(firebaseConfig);
+const realtimeDb = firebaseApp ? firebaseNamespace.database(firebaseApp) : null;
+const curriculumRef = realtimeDb ? realtimeDb.ref(FIREBASE_CURRICULUM_PATH) : null;
 
 const getData = (key, fallback) => {
   try {
@@ -66,19 +84,12 @@ const normalizeLibrary = (library) =>
     authors: (section.authors || []).map((author) => ({
       ...author,
       era: author.era || section.category,
+      bio: author.bio || "",
       works: (author.works || []).map(normalizeWork),
     })),
   }));
 
-const hydrateLibrary = () => {
-  const stored = getData(STORAGE_KEYS.library, null);
-  if (!stored || !Array.isArray(stored) || !stored.length) {
-    const fresh = normalizeLibrary(clone(curriculumData));
-    setData(STORAGE_KEYS.library, fresh);
-    return fresh;
-  }
-  return normalizeLibrary(stored);
-};
+const getDefaultLibrary = () => normalizeLibrary(clone(curriculumData));
 
 const syncSessionUser = () => {
   if (!state.currentUser) return;
@@ -100,7 +111,7 @@ const attachRole = (user, enableAdminHook = false) => ({
 const initState = () => {
   state.users = getData(STORAGE_KEYS.users, []);
   state.pendingPayments = getData(STORAGE_KEYS.pendingPayments, []);
-  state.library = hydrateLibrary();
+  state.library = getDefaultLibrary();
   refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
   state.currentUser = existingUser ? attachRole(existingUser, true) : null;
@@ -116,7 +127,6 @@ const persistUsers = () => {
 };
 
 const persistPayments = () => setData(STORAGE_KEYS.pendingPayments, state.pendingPayments);
-const persistLibrary = () => setData(STORAGE_KEYS.library, state.library);
 
 const findAuthorById = (authorId) => {
   for (const section of state.library) {
@@ -146,6 +156,51 @@ const closeAdminModalState = () => {
 
 const closeReceiptPreview = () => {
   state.receiptPreview = null;
+};
+
+const writeCurriculumToCloud = async (nextLibrary) => {
+  if (!curriculumRef) {
+    state.curriculumError = "Firebase კავშირი ვერ დამყარდა.";
+    throw new Error("Firebase database is not available.");
+  }
+  await curriculumRef.set(nextLibrary);
+};
+
+const subscribeToCurriculum = () => {
+  if (!curriculumRef) {
+    state.curriculumLoading = false;
+    state.curriculumError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
+    render();
+    return;
+  }
+
+  curriculumRef.on(
+    "value",
+    async (snapshot) => {
+      const remoteValue = snapshot.val();
+      if (!remoteValue) {
+        const seededLibrary = getDefaultLibrary();
+        try {
+          await curriculumRef.set(seededLibrary);
+          state.library = seededLibrary;
+          state.curriculumError = "";
+        } catch {
+          state.library = seededLibrary;
+          state.curriculumError = "საწყისი ბიბლიოთეკის ატვირთვა ვერ მოხერხდა.";
+        }
+      } else {
+        state.library = normalizeLibrary(remoteValue);
+        state.curriculumError = "";
+      }
+      state.curriculumLoading = false;
+      render();
+    },
+    () => {
+      state.curriculumLoading = false;
+      state.curriculumError = "ბიბლიოთეკის სინქრონიზაცია ვერ მოხერხდა.";
+      render();
+    }
+  );
 };
 
 const isPremium = () => state.currentUser && (state.currentUser.status === "premium" || state.currentUser.role === "admin");
@@ -405,18 +460,19 @@ const previewReceipt = (paymentId) => {
   render();
 };
 
-const saveAuthor = (event) => {
+const saveAuthor = async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const editorData = state.editAuthorId ? getSelectedEditorData() : null;
   const categoryId = form.categoryId?.value || editorData?.section?.id;
   const name = form.name.value.trim();
   const era = form.era.value.trim();
+  const bio = form.bio.value.trim();
   const portrait = form.dataset.base64 || form.portraitUrl.value.trim();
   const authorId = state.editAuthorId || `${slugify(name) || "author"}-${Date.now()}`;
 
-  if (!name || !era) {
-    alert("გთხოვთ შეავსოთ ავტორის სახელი და ეპოქა.");
+  if (!name || !era || !bio) {
+    alert("გთხოვთ შეავსოთ ავტორის სახელი, ეპოქა და ბიოგრაფია.");
     return;
   }
 
@@ -430,7 +486,7 @@ const saveAuthor = (event) => {
       ...section,
       authors: section.authors.map((author) => {
         if (author.id !== state.editAuthorId) return author;
-        return { ...author, name, era, portrait };
+        return { ...author, name, era, bio, portrait };
       }),
     }));
   } else {
@@ -445,6 +501,7 @@ const saveAuthor = (event) => {
                 id: authorId,
                 name,
                 era,
+                bio,
                 portrait,
                 works: [],
               },
@@ -455,13 +512,17 @@ const saveAuthor = (event) => {
     state.selectedWorkId = null;
   }
 
-  persistLibrary();
-  closeAdminModalState();
-  alert("ავტორი წარმატებით შენახულია.");
-  render();
+  try {
+    await writeCurriculumToCloud(state.library);
+    closeAdminModalState();
+    alert("ავტორი წარმატებით შენახულია.");
+    render();
+  } catch {
+    alert("ავტორის შენახვა Firebase-ში ვერ მოხერხდა.");
+  }
 };
 
-const saveWork = (event) => {
+const saveWork = async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const authorId = state.editAuthorId;
@@ -508,10 +569,14 @@ const saveWork = (event) => {
 
   state.selectedAuthorId = authorId;
   state.selectedWorkId = workId;
-  persistLibrary();
-  closeAdminModalState();
-  alert(action === "publish" ? "ნაწარმოები გამოქვეყნდა." : "ნაწარმოები შენახულია.");
-  render();
+  try {
+    await writeCurriculumToCloud(state.library);
+    closeAdminModalState();
+    alert(action === "publish" ? "ნაწარმოები გამოქვეყნდა." : "ნაწარმოები შენახულია.");
+    render();
+  } catch {
+    alert("ნაწარმოების შენახვა Firebase-ში ვერ მოხერხდა.");
+  }
 };
 
 const openAdminEditor = (mode, authorId = null, workId = null) => {
@@ -672,6 +737,7 @@ const renderLibraryGrid = () =>
                       <p>${author.era || section.category}</p>
                     </div>
                   </div>
+                  <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
                   <div class="work-list">
                     ${author.works
                       .map(
@@ -813,7 +879,7 @@ const renderWorkPanel = () => {
 };
 
 const libraryMarkup = () => `
-  <section class="dashboard-layout">
+  <section class="library-shell">
     <div class="library-column">
       <div class="library-header">
         <div>
@@ -826,9 +892,18 @@ const libraryMarkup = () => `
             : ""
         }
       </div>
+      ${
+        state.curriculumLoading
+          ? `<div class="sync-banner">ბიბლიოთეკა იტვირთება Firebase-დან...</div>`
+          : ""
+      }
+      ${
+        state.curriculumError
+          ? `<div class="sync-banner error">${state.curriculumError}</div>`
+          : ""
+      }
       ${renderLibraryGrid()}
     </div>
-    ${renderWorkPanel()}
   </section>
 `;
 
@@ -1033,6 +1108,10 @@ const adminModalMarkup = () => {
           <label>
             <span>ეპოქა</span>
             <input name="era" type="text" value="${selected?.author.era || selected?.section.category || ""}" required />
+          </label>
+          <label>
+            <span>ბიოგრაფია</span>
+            <textarea name="bio" rows="4" required>${selected?.author.bio || ""}</textarea>
           </label>
           <label>
             <span>პორტრეტის URL</span>
@@ -1255,3 +1334,4 @@ const bindEvents = () => {
 
 initState();
 render();
+subscribeToCurriculum();
