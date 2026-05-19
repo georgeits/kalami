@@ -202,6 +202,16 @@ const normalizeAuthorsMap = (payload) => {
 
 const getDefaultAuthorsMap = () => normalizeAuthorsMap(clone(curriculumData));
 
+const hasRenderableAuthors = (authorsMap) =>
+  !!authorsMap &&
+  Object.keys(authorsMap).length > 0 &&
+  Object.values(authorsMap).some(
+    (author) =>
+      author &&
+      typeof author === "object" &&
+      (author.name || author.bio || author.image || author.portrait || author.works)
+  );
+
 const getUserRef = (userId) => (usersRootRef && userId ? usersRootRef.child(String(userId)) : null);
 const getPendingPaymentRef = (userId) =>
   pendingPaymentsRootRef && userId ? pendingPaymentsRootRef.child(String(userId)) : null;
@@ -388,11 +398,18 @@ const subscribeToCurriculum = () => {
     (snapshot) => {
       const remoteValue = snapshot.val();
       if (!remoteValue) {
-        state.library = {};
+        state.library = getDefaultAuthorsMap();
         state.curriculumError = "";
       } else {
-        state.library = normalizeAuthorsMap(remoteValue);
-        state.curriculumError = "";
+        const normalizedAuthors = normalizeAuthorsMap(remoteValue);
+        if (hasRenderableAuthors(normalizedAuthors)) {
+          state.library = normalizedAuthors;
+          state.curriculumError = "";
+        } else {
+          state.library = getDefaultAuthorsMap();
+          state.curriculumError = "Firebase მონაცემების სტრუქტურა არასწორია. ჩაიტვირთა სარეზერვო ბიბლიოთეკა.";
+          console.warn("Unexpected Firebase curriculum payload:", remoteValue);
+        }
       }
       state.curriculumLoading = false;
       render();
@@ -942,8 +959,8 @@ const landingMarkup = () => `
 
 const getAuthorsArray = () =>
   Object.entries(state.library || {}).map(([id, author]) => ({
-    id,
     ...author,
+    id,
     works: author.works || {},
   }));
 
