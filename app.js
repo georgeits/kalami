@@ -1,5 +1,5 @@
 import { curriculumData, defaultUserStatus } from "./data.js";
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getDatabase, onValue, ref, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const STORAGE_KEYS = {
@@ -42,13 +42,26 @@ const state = {
   curriculumLoading: true,
   curriculumError: "",
   paymentsError: "",
+  firebaseReady: true,
 };
 
 const app = document.querySelector("#app");
-const firebaseApp = initializeApp(firebaseConfig);
-const realtimeDb = getDatabase(firebaseApp);
-const curriculumRef = ref(realtimeDb, FIREBASE_CURRICULUM_PATH);
-const pendingPaymentsRef = ref(realtimeDb, FIREBASE_PENDING_PAYMENTS_PATH);
+let firebaseApp = null;
+let realtimeDb = null;
+let curriculumRef = null;
+let pendingPaymentsRef = null;
+
+try {
+  firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
+  realtimeDb = getDatabase(firebaseApp);
+  curriculumRef = ref(realtimeDb, FIREBASE_CURRICULUM_PATH);
+  pendingPaymentsRef = ref(realtimeDb, FIREBASE_PENDING_PAYMENTS_PATH);
+} catch (error) {
+  state.firebaseReady = false;
+  state.curriculumLoading = false;
+  state.curriculumError = error?.message || "Firebase ინიციალიზაცია ვერ შესრულდა.";
+  state.paymentsError = error?.message || "Firebase ინიციალიზაცია ვერ შესრულდა.";
+}
 
 const getData = (key, fallback) => {
   try {
@@ -218,6 +231,11 @@ const subscribeToCurriculum = () => {
 };
 
 const subscribeToPendingPayments = () => {
+  if (!pendingPaymentsRef) {
+    state.paymentsError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
+    render();
+    return;
+  }
   onValue(
     pendingPaymentsRef,
     (snapshot) => {
