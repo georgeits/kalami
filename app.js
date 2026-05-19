@@ -59,13 +59,13 @@ const syncSessionUser = () => {
     localStorage.removeItem(STORAGE_KEYS.currentUser);
     return;
   }
-  state.currentUser = attachRole(match);
+  state.currentUser = attachRole(match, true);
   setData(STORAGE_KEYS.currentUser, state.currentUser);
 };
 
-const attachRole = (user) => ({
+const attachRole = (user, enableAdminHook = false) => ({
   ...user,
-  role: user.email === ADMIN_EMAIL ? "admin" : user.role || "student",
+  role: enableAdminHook && user.email === ADMIN_EMAIL ? "admin" : user.role || "student",
 });
 
 const initState = () => {
@@ -74,7 +74,7 @@ const initState = () => {
   state.library = hydrateLibrary();
   refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
-  state.currentUser = existingUser ? attachRole(existingUser) : null;
+  state.currentUser = existingUser ? attachRole(existingUser, true) : null;
   syncSessionUser();
   if (state.currentUser) {
     state.route = "dashboard";
@@ -225,7 +225,7 @@ const handleSignup = (formData) => {
     lastName,
     email,
     password,
-    status: email === ADMIN_EMAIL ? "premium" : defaultUserStatus,
+    status: defaultUserStatus,
     subscriptionPlan: null,
     subscriptionApprovedAt: null,
     subscriptionExpiresAt: null,
@@ -250,7 +250,7 @@ const handleLogin = (formData) => {
     return;
   }
 
-  const sessionUser = attachRole(user);
+  const sessionUser = attachRole(user, true);
   state.currentUser = sessionUser;
   setData(STORAGE_KEYS.currentUser, sessionUser);
   state.route = "dashboard";
