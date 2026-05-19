@@ -1,15 +1,15 @@
 import { curriculumData, defaultUserStatus } from "./data.js";
-import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, onValue, ref, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const STORAGE_KEYS = {
   users: "users",
   currentUser: "currentUser",
+  pendingPayments: "pendingPayments",
 };
 
 const ADMIN_EMAIL = "giorgijavakhishvili75@gmail.com";
 const FIREBASE_CURRICULUM_PATH = "curriculum";
 const FIREBASE_PENDING_PAYMENTS_PATH = "pendingPayments";
+const FIREBASE_USERS_PATH = "users";
 const firebaseConfig = {
   apiKey: "AIzaSyDfHIssC0SbMkaADtLE64Y28DbjWzLoiJU",
   authDomain: "kalami-fe323.firebaseapp.com",
@@ -17,7 +17,7 @@ const firebaseConfig = {
   projectId: "kalami-fe323",
   storageBucket: "kalami-fe323.firebasestorage.app",
   messagingSenderId: "1831718779",
-  appId: "1:1831718779:web:d15a1ca6d0a4ae1a0577de",
+  appId: "1:1831718779:web:d15a1ca6d0a4ee1a0577de",
   measurementId: "G-NFKNZX6K6S",
 };
 
@@ -42,26 +42,26 @@ const state = {
   curriculumLoading: true,
   curriculumError: "",
   paymentsError: "",
-  firebaseReady: true,
 };
 
 const app = document.querySelector("#app");
-let firebaseApp = null;
-let realtimeDb = null;
-let curriculumRef = null;
-let pendingPaymentsRef = null;
+const firebaseNamespace = window.firebase;
+let currentUserRef = null;
+let currentUserListener = null;
 
-try {
-  firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
-  realtimeDb = getDatabase(firebaseApp);
-  curriculumRef = ref(realtimeDb, FIREBASE_CURRICULUM_PATH);
-  pendingPaymentsRef = ref(realtimeDb, FIREBASE_PENDING_PAYMENTS_PATH);
-} catch (error) {
-  state.firebaseReady = false;
+if (!firebaseNamespace) {
   state.curriculumLoading = false;
-  state.curriculumError = error?.message || "Firebase ინიციალიზაცია ვერ შესრულდა.";
-  state.paymentsError = error?.message || "Firebase ინიციალიზაცია ვერ შესრულდა.";
+  state.curriculumError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
 }
+
+if (firebaseNamespace && !firebaseNamespace.apps.length) {
+  firebaseNamespace.initializeApp(firebaseConfig);
+}
+
+const database = firebaseNamespace ? firebaseNamespace.database() : null;
+const curriculumRef = database ? database.ref(FIREBASE_CURRICULUM_PATH) : null;
+const usersRootRef = database ? database.ref(FIREBASE_USERS_PATH) : null;
+const pendingPaymentsRootRef = database ? database.ref(FIREBASE_PENDING_PAYMENTS_PATH) : null;
 
 const getData = (key, fallback) => {
   try {
@@ -105,6 +105,64 @@ const normalizeLibrary = (library) =>
 
 const getDefaultLibrary = () => normalizeLibrary(clone(curriculumData));
 
+const getUserRef = (userId) => (usersRootRef && userId ? usersRootRef.child(String(userId)) : null);
+const getPendingPaymentRef = (userId) =>
+  pendingPaymentsRootRef && userId ? pendingPaymentsRootRef.child(String(userId)) : null;
+
+const mergeUserIntoLocalState = (user) => {
+  const normalizedUser = attachRole(user, true);
+  const existingIndex = state.users.findIndex((item) => String(item.id) === String(normalizedUser.id));
+  if (existingIndex === -1) {
+    state.users.push(normalizedUser);
+  } else {
+    state.users[existingIndex] = { ...state.users[existingIndex], ...normalizedUser };
+  }
+  if (state.currentUser && String(state.currentUser.id) === String(normalizedUser.id)) {
+    state.currentUser = { ...state.currentUser, ...normalizedUser };
+    setData(STORAGE_KEYS.currentUser, state.currentUser);
+  }
+  persistUsers();
+};
+
+const syncUserProfileToCloud = async (user) => {
+  const userRef = getUserRef(user.id);
+  if (!userRef) return;
+  await userRef.update({
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    password: user.password,
+    status: user.status,
+    subscriptionPlan: user.subscriptionPlan || null,
+    subscriptionApprovedAt: user.subscriptionApprovedAt || null,
+    subscriptionExpiresAt: user.subscriptionExpiresAt || null,
+    role: attachRole(user, true).role,
+  });
+};
+
+const unsubscribeCurrentUserNode = () => {
+  if (currentUserRef && currentUserListener) {
+    currentUserRef.off("value", currentUserListener);
+  }
+  currentUserRef = null;
+  currentUserListener = null;
+};
+
+const subscribeCurrentUserNode = (userId) => {
+  unsubscribeCurrentUserNode();
+  const userRef = getUserRef(userId);
+  if (!userRef) return;
+  currentUserRef = userRef;
+  currentUserListener = (snapshot) => {
+    const cloudUser = snapshot.val();
+    if (!cloudUser) return;
+    mergeUserIntoLocalState(cloudUser);
+    render();
+  };
+  userRef.on("value", currentUserListener);
+};
+
 const syncSessionUser = () => {
   if (!state.currentUser) return;
   const match = state.users.find((user) => user.email === state.currentUser.email);
@@ -125,13 +183,14 @@ const attachRole = (user, enableAdminHook = false) => ({
 const initState = () => {
   state.users = getData(STORAGE_KEYS.users, []);
   state.pendingPayments = [];
-  state.library = getDefaultLibrary();
+  state.library = [];
   refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
   state.currentUser = existingUser ? attachRole(existingUser, true) : null;
   syncSessionUser();
   if (state.currentUser) {
     state.route = "dashboard";
+    subscribeCurrentUserNode(state.currentUser.id);
   }
 };
 
@@ -187,14 +246,7 @@ const writeCurriculumToCloud = async (nextLibrary) => {
     state.curriculumError = "Firebase კავშირი ვერ დამყარდა.";
     throw new Error("Firebase database is not available.");
   }
-  await set(curriculumRef, nextLibrary);
-};
-
-const writePendingPaymentsToCloud = async (nextPayments) => {
-  const payload = Object.fromEntries(
-    nextPayments.map((payment) => [String(payment.id), payment])
-  );
-  await set(pendingPaymentsRef, payload);
+  await curriculumRef.set(nextLibrary);
 };
 
 const subscribeToCurriculum = () => {
@@ -205,12 +257,12 @@ const subscribeToCurriculum = () => {
     return;
   }
 
-  onValue(
-    curriculumRef,
+  curriculumRef.on(
+    "value",
     (snapshot) => {
       const remoteValue = snapshot.val();
       if (!remoteValue) {
-        state.library = getDefaultLibrary();
+        state.library = [];
         state.curriculumError = "";
       } else {
         state.library = normalizeLibrary(remoteValue);
@@ -231,16 +283,16 @@ const subscribeToCurriculum = () => {
 };
 
 const subscribeToPendingPayments = () => {
-  if (!pendingPaymentsRef) {
+  if (!pendingPaymentsRootRef) {
     state.paymentsError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
     render();
     return;
   }
-  onValue(
-    pendingPaymentsRef,
+
+  pendingPaymentsRootRef.on(
+    "value",
     (snapshot) => {
-      const remoteValue = snapshot.val();
-      state.pendingPayments = normalizePendingPayments(remoteValue);
+      state.pendingPayments = normalizePendingPayments(snapshot.val());
       state.paymentsError = "";
       render();
     },
@@ -333,6 +385,7 @@ const updateCurrentUserStatus = (status) => {
     user.email === state.currentUser.email ? { ...user, status } : user
   );
   persistUsers();
+  syncUserProfileToCloud({ ...state.currentUser, status }).catch(() => {});
 };
 
 const setRoute = (route) => {
@@ -341,6 +394,7 @@ const setRoute = (route) => {
 };
 
 const signOut = () => {
+  unsubscribeCurrentUserNode();
   state.currentUser = null;
   state.route = "landing";
   state.dashboardTab = "library";
@@ -352,7 +406,7 @@ const signOut = () => {
   render();
 };
 
-const handleSignup = (formData) => {
+const handleSignup = async (formData) => {
   const firstName = formData.get("firstName").trim();
   const lastName = formData.get("lastName").trim();
   const email = formData.get("email").trim().toLowerCase();
@@ -384,12 +438,18 @@ const handleSignup = (formData) => {
   persistUsers();
   state.currentUser = newUser;
   setData(STORAGE_KEYS.currentUser, newUser);
+  try {
+    await syncUserProfileToCloud(newUser);
+    subscribeCurrentUserNode(newUser.id);
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "მომხმარებლის სინქრონიზაცია ვერ მოხერხდა."));
+  }
   state.route = "dashboard";
   state.paymentOpen = Boolean(state.selectedPlan);
   render();
 };
 
-const handleLogin = (formData) => {
+const handleLogin = async (formData) => {
   const email = formData.get("email").trim().toLowerCase();
   const password = formData.get("password").trim();
   const user = state.users.find((item) => item.email === email && item.password === password);
@@ -402,6 +462,12 @@ const handleLogin = (formData) => {
   const sessionUser = attachRole(user, true);
   state.currentUser = sessionUser;
   setData(STORAGE_KEYS.currentUser, sessionUser);
+  try {
+    await syncUserProfileToCloud(sessionUser);
+    subscribeCurrentUserNode(sessionUser.id);
+  } catch (error) {
+    alert(getFirebaseErrorMessage(error, "მომხმარებლის სინქრონიზაცია ვერ მოხერხდა."));
+  }
   state.route = "dashboard";
   state.paymentOpen = Boolean(state.selectedPlan);
   render();
@@ -430,6 +496,9 @@ const submitPayment = async (event) => {
 
   const packet = {
     id: Date.now(),
+    studentName: `${state.currentUser.firstName} ${state.currentUser.lastName}`,
+    studentEmail: state.currentUser.email,
+    receiptImage: screenshot,
     userId: state.currentUser.id,
     email: state.currentUser.email,
     firstName: state.currentUser.firstName,
@@ -442,8 +511,14 @@ const submitPayment = async (event) => {
     status: "pending",
   };
 
+  const paymentRef = getPendingPaymentRef(state.currentUser.id);
+  if (!paymentRef) {
+    alert("ქვითრის გაგზავნა ვერ მოხერხდა.");
+    return;
+  }
+
   try {
-    await writePendingPaymentsToCloud([...state.pendingPayments, packet]);
+    await paymentRef.set(packet);
     state.paymentsError = "";
     updateCurrentUserStatus("pending");
     alert("ქვითარი წარმატებით გაიგზავნა.");
@@ -470,39 +545,37 @@ const handleFileChange = (input, form) => {
 };
 
 const approvePayment = async (paymentId, nextStatus) => {
-  const request = state.pendingPayments.find((item) => item.id === paymentId);
+  const request = state.pendingPayments.find((item) => Number(item.id) === paymentId);
   if (!request) return;
 
   const planDuration = planCatalog[request.planId]?.durationDays || 30;
   const approvedAt = Date.now();
   const expiresAt = approvedAt + planDuration * DAY_MS;
 
-  state.users = state.users.map((user) => {
-    if (user.email !== request.email) return user;
-    if (nextStatus === "premium") {
-      return {
-        ...user,
-        status: "premium",
-        subscriptionPlan: request.planId,
-        subscriptionApprovedAt: approvedAt,
-        subscriptionExpiresAt: expiresAt,
-      };
-    }
-    return {
-      ...user,
-      status: "free",
-      subscriptionPlan: null,
-      subscriptionApprovedAt: null,
-      subscriptionExpiresAt: null,
-    };
-  });
-
-  const nextPendingPayments = state.pendingPayments.filter((item) => item.id !== paymentId);
+  const userRef = getUserRef(request.userId);
+  const paymentRef = getPendingPaymentRef(request.userId);
+  if (!userRef || !paymentRef) return;
 
   try {
-    await writePendingPaymentsToCloud(nextPendingPayments);
+    await userRef.update(
+      nextStatus === "premium"
+        ? {
+            status: "premium",
+            approvedAt,
+            subscriptionPlan: request.planId,
+            subscriptionApprovedAt: approvedAt,
+            subscriptionExpiresAt: expiresAt,
+          }
+        : {
+            status: "free",
+            approvedAt: null,
+            subscriptionPlan: null,
+            subscriptionApprovedAt: null,
+            subscriptionExpiresAt: null,
+          }
+    );
+    await paymentRef.remove();
     state.paymentsError = "";
-    persistUsers();
     closeReceiptPreview();
     alert(
       nextStatus === "premium"
@@ -1024,15 +1097,15 @@ const paymentsMarkup = () => `
               .map((payment) => `
                 <article class="payment-row">
                   <div>
-                    <strong>${payment.firstName} ${payment.lastName}</strong>
-                    <p>${payment.senderName}</p>
+                    <strong>${payment.studentName || `${payment.firstName} ${payment.lastName}`}</strong>
+                    <p>${payment.senderName || payment.studentName || "-"}</p>
                   </div>
                   <div>
-                    <strong>${payment.email}</strong>
+                    <strong>${payment.studentEmail || payment.email}</strong>
                     <p>${getPlanName(payment.planId)}</p>
                   </div>
                   <button class="receipt-thumb-btn" data-preview-receipt="${payment.id}">
-                    <img src="${payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
+                    <img src="${payment.receiptImage || payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
                     <span>ქვითრის გახსნა</span>
                   </button>
                   <div class="payment-actions">
@@ -1205,15 +1278,15 @@ const receiptPreviewMarkup = () => {
         <div class="modal-head">
           <div>
             <span class="section-tag premium-lock">ქვითრის გადამოწმება</span>
-            <h3>${state.receiptPreview.firstName} ${state.receiptPreview.lastName}</h3>
+            <h3>${state.receiptPreview.studentName || `${state.receiptPreview.firstName} ${state.receiptPreview.lastName}`}</h3>
           </div>
           <button class="icon-button" id="closeReceiptPreview">✕</button>
         </div>
         <div class="receipt-preview-meta">
-          <p><strong>ელ-ფოსტა:</strong> ${state.receiptPreview.email}</p>
+          <p><strong>ელ-ფოსტა:</strong> ${state.receiptPreview.studentEmail || state.receiptPreview.email}</p>
           <p><strong>გეგმა:</strong> ${getPlanName(state.receiptPreview.planId)}</p>
         </div>
-        <img src="${state.receiptPreview.screenshot}" alt="ქვითარი" class="receipt-preview-image" />
+        <img src="${state.receiptPreview.receiptImage || state.receiptPreview.screenshot}" alt="ქვითარი" class="receipt-preview-image" />
       </div>
     </div>
   `;
