@@ -158,6 +158,22 @@ button {
   margin-top: 24px;
 }
 
+.hero-stats-vertical {
+  grid-template-columns: 1fr;
+  margin-top: 0;
+  grid-template-rows: repeat(3, 1fr);
+  align-content: stretch;
+  height: 100%;
+  gap: 24px;
+}
+
+.hero-stats-vertical article {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  align-content: center;
+}
+
 .hero-stats article,
 .profile-meta div {
   padding: 18px;
@@ -186,6 +202,18 @@ button {
   padding: 28px;
   position: relative;
   overflow: hidden;
+}
+
+.pricing-tier {
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+
+.pricing-tier:hover {
+  transform: scale(1.03);
+}
+
+.pricing-tier.premium:hover {
+  box-shadow: 0 0 0 1px rgba(214, 74, 96, 0.22), 0 18px 40px rgba(214, 74, 96, 0.2);
 }
 
 .spotlight {
@@ -222,7 +250,8 @@ button {
 
 .gateway-grid {
   margin-top: 24px;
-  grid-template-columns: 0.95fr 1.05fr;
+  grid-template-columns: minmax(0, 760px);
+  justify-content: center;
 }
 
 .auth-card,
@@ -231,7 +260,11 @@ button {
 }
 
 .pricing-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pricing-grid-landing {
+  margin-top: 24px;
 }
 
 .switch-row,
@@ -617,6 +650,15 @@ button {
   color: #7a5700;
 }
 
+.payments-section + .payments-section {
+  margin-top: 28px;
+}
+
+.payments-section h3 {
+  margin: 0 0 14px;
+  color: var(--navy);
+}
+
 .payments-grid {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   margin-top: 22px;
@@ -624,6 +666,15 @@ button {
 
 .payment-card {
   padding: 20px;
+}
+
+.payment-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.payment-meta p {
+  margin: 0;
 }
 
 .payment-thumb {

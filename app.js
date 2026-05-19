@@ -17,6 +17,7 @@ const state = {
   selectedWorkId: null,
   paywallOpen: false,
   paymentOpen: false,
+  selectedPlan: null,
   adminModalOpen: false,
   editAuthorId: null,
   users: [],
@@ -71,6 +72,7 @@ const initState = () => {
   state.users = getData(STORAGE_KEYS.users, []);
   state.pendingPayments = getData(STORAGE_KEYS.pendingPayments, []);
   state.library = hydrateLibrary();
+  refreshSubscriptionStatuses();
   const existingUser = getData(STORAGE_KEYS.currentUser, null);
   state.currentUser = existingUser ? attachRole(existingUser) : null;
   syncSessionUser();
@@ -109,6 +111,74 @@ const getSelectedWork = () => {
 const isPremium = () => state.currentUser && (state.currentUser.status === "premium" || state.currentUser.role === "admin");
 const isPending = () => state.currentUser && state.currentUser.status === "pending";
 const isAdmin = () => state.currentUser && state.currentUser.role === "admin";
+
+const PLAN_DURATIONS = {
+  "5": 30,
+  "10": 30,
+};
+
+const planCatalog = {
+  "5": {
+    name: "5 ლარი",
+    price: "5 ლარი / თვე",
+    summary: "სრული სასწავლო ბიბლიოთეკა ერთ სივრცეში.",
+    durationDays: PLAN_DURATIONS["5"],
+    features: [
+      "ნაწარმოებების შინაარსები",
+      "ავტორების ბიოგრაფიები",
+      "პერსონაჟების ანალიზი",
+      "სტრუქტურა და ისტორიული კონტექსტი",
+    ],
+  },
+  "10": {
+    name: "10 ლარი",
+    price: "10 ლარი / თვე",
+    summary: "ყველაფერი, რაც 5-ლარიან გეგმაშია, დამატებითი პრაქტიკით.",
+    durationDays: PLAN_DURATIONS["10"],
+    features: [
+      "ნაწარმოებების შინაარსები",
+      "ავტორების ბიოგრაფიები",
+      "პერსონაჟების ანალიზი",
+      "სტრუქტურა და ისტორიული კონტექსტი",
+      "ქვიზები",
+      "ტესტირება",
+    ],
+  },
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const formatDate = (value) => {
+  if (!value) return "არ არის";
+  return new Date(value).toLocaleDateString("ka-GE");
+};
+
+const getDaysLeft = (value) => {
+  if (!value) return 0;
+  return Math.max(0, Math.ceil((value - Date.now()) / DAY_MS));
+};
+
+const getPlanName = (planId) => planCatalog[planId]?.name || "გეგმა";
+
+const refreshSubscriptionStatuses = () => {
+  let changed = false;
+  state.users = state.users.map((user) => {
+    if (!user.subscriptionExpiresAt) return user;
+    if (user.role === "admin") return user;
+    if (user.subscriptionExpiresAt <= Date.now() && user.status === "premium") {
+      changed = true;
+      return {
+        ...user,
+        status: "free",
+        subscriptionPlan: null,
+        subscriptionApprovedAt: null,
+        subscriptionExpiresAt: null,
+      };
+    }
+    return user;
+  });
+  if (changed) persistUsers();
+};
 
 const updateCurrentUserStatus = (status) => {
   if (!state.currentUser) return;
@@ -156,6 +226,9 @@ const handleSignup = (formData) => {
     email,
     password,
     status: email === ADMIN_EMAIL ? "premium" : defaultUserStatus,
+    subscriptionPlan: null,
+    subscriptionApprovedAt: null,
+    subscriptionExpiresAt: null,
   });
 
   state.users.push(newUser);
@@ -163,6 +236,7 @@ const handleSignup = (formData) => {
   state.currentUser = newUser;
   setData(STORAGE_KEYS.currentUser, newUser);
   state.route = "dashboard";
+  state.paymentOpen = Boolean(state.selectedPlan);
   render();
 };
 
@@ -180,6 +254,7 @@ const handleLogin = (formData) => {
   state.currentUser = sessionUser;
   setData(STORAGE_KEYS.currentUser, sessionUser);
   state.route = "dashboard";
+  state.paymentOpen = Boolean(state.selectedPlan);
   render();
 };
 
@@ -206,9 +281,16 @@ const submitPayment = (event) => {
 
   const packet = {
     id: Date.now(),
+    userId: state.currentUser.id,
     email: state.currentUser.email,
+    password: state.currentUser.password,
+    firstName: state.currentUser.firstName,
+    lastName: state.currentUser.lastName,
     senderName,
     screenshot,
+    planId: state.selectedPlan || "5",
+    approvedAt: null,
+    expiresAt: null,
     status: "pending",
   };
 
@@ -217,6 +299,7 @@ const submitPayment = (event) => {
   updateCurrentUserStatus("pending");
   alert("ქვითარი წარმატებით გაიგზავნა.");
   state.paymentOpen = false;
+  state.selectedPlan = null;
   state.paywallOpen = true;
   render();
 };
@@ -237,12 +320,39 @@ const approvePayment = (paymentId, nextStatus) => {
   const request = state.pendingPayments.find((item) => item.id === paymentId);
   if (!request) return;
 
+  const planDuration = planCatalog[request.planId]?.durationDays || 30;
+  const approvedAt = Date.now();
+  const expiresAt = approvedAt + planDuration * DAY_MS;
+
   state.users = state.users.map((user) => {
     if (user.email !== request.email) return user;
-    return { ...user, status: nextStatus };
+    if (nextStatus === "premium") {
+      return {
+        ...user,
+        status: "premium",
+        subscriptionPlan: request.planId,
+        subscriptionApprovedAt: approvedAt,
+        subscriptionExpiresAt: expiresAt,
+      };
+    }
+    return {
+      ...user,
+      status: "free",
+      subscriptionPlan: null,
+      subscriptionApprovedAt: null,
+      subscriptionExpiresAt: null,
+    };
   });
 
-  state.pendingPayments = state.pendingPayments.filter((item) => item.id !== paymentId);
+  state.pendingPayments = state.pendingPayments.map((item) => {
+    if (item.id !== paymentId) return item;
+    return {
+      ...item,
+      status: nextStatus === "premium" ? "approved" : "rejected",
+      approvedAt: nextStatus === "premium" ? approvedAt : null,
+      expiresAt: nextStatus === "premium" ? expiresAt : null,
+    };
+  });
   persistPayments();
   persistUsers();
 
@@ -251,6 +361,38 @@ const approvePayment = (paymentId, nextStatus) => {
       ? "მომხმარებელი წარმატებით გააქტიურდა."
       : "ქვითარი უარყოფილია და სტატუსი განულდა."
   );
+  render();
+};
+
+const suspendSubscription = (paymentId) => {
+  const request = state.pendingPayments.find((item) => item.id === paymentId);
+  if (!request) return;
+
+  state.users = state.users.map((user) =>
+    user.email !== request.email
+      ? user
+      : {
+          ...user,
+          status: "free",
+          subscriptionPlan: null,
+          subscriptionApprovedAt: null,
+          subscriptionExpiresAt: null,
+        }
+  );
+
+  state.pendingPayments = state.pendingPayments.map((item) =>
+    item.id !== paymentId
+      ? item
+      : {
+          ...item,
+          status: "suspended",
+          expiresAt: Date.now(),
+        }
+  );
+
+  persistPayments();
+  persistUsers();
+  alert("წვდომა შეჩერდა.");
   render();
 };
 
@@ -380,27 +522,16 @@ const landingMarkup = () => `
     <div class="hero-panel">
       <div class="hero-copy">
         <span class="eyebrow">Kalami.ge • 2026 ეროვნული გამოცდები</span>
-        <h1>წაიკითხე ნაკლები ქაოსი, ისწავლე მეტი სიზუსტით.</h1>
+        <h1>ყველაფერი ქართული ლიტერატურის სრულყოფილად გასაგებად, ერთ სივრცეში.</h1>
         <p>
           კალამი აერთიანებს ქართულ ლიტერატურას ერთ მოწესრიგებულ სივრცეში: სიუჟეტური შეჯამებები,
           პერსონაჟთა ანალიზი, სტრუქტურული რუკები და ისტორიული კონტექსტი მხოლოდ 5 ლარად თვეში.
         </p>
-        <div class="hero-stats">
-          <article><strong>40+</strong><span>ავტორი და ტექსტი</span></article>
-          <article><strong>100%</strong><span>LocalStorage persistence</span></article>
-          <article><strong>5 GEL</strong><span>სრული წვდომა / თვე</span></article>
-        </div>
       </div>
-      <div class="pricing-card spotlight">
-        <div class="plan-badge">Premium Access</div>
-        <h2>სრული კატალოგი</h2>
-        <p>ყველა ავტორი, ყველა თავი, სწრაფი დაბრუნება შენს სამუშაო სივრცეში.</p>
-        <div class="price-line">5 ლარი<span>/თვე</span></div>
-        <ul class="plan-list">
-          <li>ქართული ლიტერატურის 2026 პროგრამა</li>
-          <li>ავტორები, ნაწარმოებები, კონტექსტი</li>
-          <li>ხელით აქტივაცია Bank of Georgia გადარიცხვით</li>
-        </ul>
+      <div class="hero-stats hero-stats-vertical">
+        <article><strong>40+</strong><span>ავტორი და ტექსტი</span></article>
+        <article><strong>100%</strong><span>სანდო და მოწესრიგებული</span></article>
+        <article><strong>5 GEL</strong><span>სრული წვდომა / თვე</span></article>
       </div>
     </div>
     <div class="gateway-grid">
@@ -429,21 +560,26 @@ const landingMarkup = () => `
           `
         }
       </section>
-      <section class="pricing-grid">
-        <article class="pricing-card">
-          <h3>Free</h3>
-          <p>დაათვალიერე ბიბლიოთეკა, ავტორები და თემატური კატეგორიები.</p>
-          <div class="mini-price">0 ლარი</div>
-        </article>
-        <article class="pricing-card premium">
-          <div class="plan-badge subtle">ყველაზე მოთხოვნადი</div>
-          <h3>Premium</h3>
-          <p>გახსენი დეტალური შინაარსი და ატვირთე ქვითარი ხელით აქტივაციისთვის.</p>
-          <div class="mini-price">5 ლარი / თვე</div>
-          <small>საქართველოს ბანკი: GE928G0000000612371503</small>
-        </article>
-      </section>
     </div>
+    <section class="pricing-grid pricing-grid-landing">
+      <article class="pricing-card pricing-tier">
+        <h3>უფასო</h3>
+        <p>დაათვალიერე ბიბლიოთეკა, ავტორები და თემატური კატეგორიები საწყისი ორიენტაციისთვის.</p>
+        <div class="mini-price">0 ლარი</div>
+      </article>
+      <article class="pricing-card pricing-tier premium">
+        <div class="plan-badge subtle">ყველაზე მოთხოვნადი</div>
+        <h3>5 ლარი / თვე</h3>
+        <p>სრული წვდომა ლიტერატურის ძირითად მასალებზე.</p>
+        <button class="primary-btn" data-open-plan="5">გამოწერა</button>
+      </article>
+      <article class="pricing-card pricing-tier premium">
+        <div class="plan-badge subtle">მაქსიმალური პაკეტი</div>
+        <h3>10 ლარი / თვე</h3>
+        <p>სრული წვდომა დამატებით ქვიზებითა და ტესტირებით.</p>
+        <button class="primary-btn" data-open-plan="10">გამოწერა</button>
+      </article>
+    </section>
   </section>
 `;
 
@@ -601,6 +737,8 @@ const profileMarkup = () => `
       <div class="profile-meta">
         <div><strong>სტატუსი</strong><span>${state.currentUser.status}</span></div>
         <div><strong>წვდომა</strong><span>${isPremium() ? "სრული" : "შეზღუდული"}</span></div>
+        <div><strong>გეგმა</strong><span>${state.currentUser.subscriptionPlan ? getPlanName(state.currentUser.subscriptionPlan) : "არ არის აქტიური"}</span></div>
+        <div><strong>დარჩენილი დღეები</strong><span>${state.currentUser.subscriptionExpiresAt ? `${getDaysLeft(state.currentUser.subscriptionExpiresAt)} დღე` : "-"}</span></div>
       </div>
       <button class="accent-btn" id="openPaymentFromProfile">💳 ქვითრის ატვირთვა</button>
       ${
@@ -620,24 +758,33 @@ const profileMarkup = () => `
 
 const paymentsMarkup = () => `
   <section class="payments-shell">
+    ${(() => {
+      const pendingRequests = state.pendingPayments.filter((payment) => payment.status === "pending");
+      const processedRequests = state.pendingPayments.filter((payment) => payment.status !== "pending");
+      return `
     <div class="library-header">
       <div>
         <span class="eyebrow">ადმინისტრაცია</span>
         <h2>გადახდების მართვა</h2>
       </div>
-      <div class="status-pill pending">${state.pendingPayments.length} მოთხოვნა</div>
+      <div class="status-pill pending">${pendingRequests.length} მოთხოვნა</div>
     </div>
-    <div class="payments-grid">
+    <div class="payments-section">
+      <h3>მოსული მოთხოვნები</h3>
+      <div class="payments-grid">
       ${
-        state.pendingPayments.length
-          ? state.pendingPayments
+        pendingRequests.length
+          ? pendingRequests
               .map(
                 (payment) => `
                   <article class="payment-card">
                     <img src="${payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
                     <div class="payment-meta">
                       <h3>${payment.senderName}</h3>
+                      <p>${payment.firstName} ${payment.lastName}</p>
                       <p>${payment.email}</p>
+                      <p>პაროლი: ${payment.password}</p>
+                      <p>გეგმა: ${getPlanName(payment.planId)}</p>
                     </div>
                     <div class="payment-actions">
                       <button class="primary-btn" data-approve="${payment.id}">დამტკიცება</button>
@@ -647,25 +794,73 @@ const paymentsMarkup = () => `
                 `
               )
               .join("")
-          : `<div class="empty-payments">ამ ეტაპზე გადახდის მოთხოვნები არ არის.</div>`
+          : `<div class="empty-payments">ამ ეტაპზე ახალი გადახდის მოთხოვნები არ არის.</div>`
       }
+      </div>
     </div>
+    <div class="payments-section">
+      <h3>დამუშავებული გამოწერები</h3>
+      <div class="payments-grid">
+      ${
+        processedRequests.length
+          ? processedRequests
+              .map(
+                (payment) => `
+                  <article class="payment-card">
+                    <img src="${payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
+                    <div class="payment-meta">
+                      <h3>${payment.senderName}</h3>
+                      <p>${payment.firstName} ${payment.lastName}</p>
+                      <p>${payment.email}</p>
+                      <p>პაროლი: ${payment.password}</p>
+                      <p>გეგმა: ${getPlanName(payment.planId)}</p>
+                      <p>სტატუსი: ${payment.status}</p>
+                      <p>დამტკიცდა: ${formatDate(payment.approvedAt)}</p>
+                      <p>იწურება: ${formatDate(payment.expiresAt)}</p>
+                      <p>დარჩენილი დღეები: ${payment.expiresAt ? getDaysLeft(payment.expiresAt) : 0}</p>
+                    </div>
+                    <div class="payment-actions">
+                      ${
+                        payment.status === "approved"
+                          ? `<button class="secondary-btn" data-suspend="${payment.id}">წვდომის შეჩერება</button>`
+                          : ""
+                      }
+                    </div>
+                  </article>
+                `
+              )
+              .join("")
+          : `<div class="empty-payments">ჯერ დამუშავებული გამოწერები არ არის.</div>`
+      }
+      </div>
+    </div>
+    `;
+    })()}
   </section>
 `;
 
 const paymentModalMarkup = () => {
   if (!state.paymentOpen || !state.currentUser) return "";
+  const plan = planCatalog[state.selectedPlan || "5"] || planCatalog["5"];
   return `
     <div class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-head">
           <div>
             <span class="section-tag premium-lock">აქტივაცია</span>
-            <h3>ქვითრის ატვირთვა</h3>
+            <h3>${plan.name} გეგმის აქტივაცია</h3>
           </div>
           <button class="icon-button" id="closePaymentModal">✕</button>
         </div>
-        <p>პლატფორმის სრული წვდომისთვის გთხოვთ გადარიცხოთ 5 ლარი მითითებულ ანგარიშზე.<br />საქართველოს ბანკი (BOG): GE928G0000000612371503</p>
+        <p>${plan.summary}</p>
+        <div class="detail-block">
+          <h4>რა შედის გეგმაში</h4>
+          <ul class="plan-list">
+            ${plan.features.map((feature) => `<li>${feature}</li>`).join("")}
+          </ul>
+        </div>
+        <p>აქტივაციისთვის გთხოვთ გადარიცხოთ <strong>${plan.price}</strong>.</p>
+        <strong>საქართველოს ბანკი (BOG): GE928G0000000612371503</strong>
         <form id="paymentForm" class="stack-form">
           <label>
             <span>გადამხდელის სახელი და გვარი</span>
@@ -771,6 +966,7 @@ const dashboardMarkup = () => `
 `;
 
 const render = () => {
+  refreshSubscriptionStatuses();
   app.innerHTML = state.route === "landing" ? landingMarkup() : dashboardMarkup();
   bindEvents();
 };
@@ -817,20 +1013,37 @@ const bindEvents = () => {
 
   const openPaymentModal = document.querySelector("#openPaymentModal");
   if (openPaymentModal) openPaymentModal.addEventListener("click", () => {
+    state.selectedPlan = "5";
     state.paymentOpen = true;
     render();
   });
 
   const openPaymentFromProfile = document.querySelector("#openPaymentFromProfile");
   if (openPaymentFromProfile) openPaymentFromProfile.addEventListener("click", () => {
+    state.selectedPlan = "5";
     state.paymentOpen = true;
     render();
   });
 
   const openPaymentFromHeader = document.querySelector("#openPaymentFromHeader");
   if (openPaymentFromHeader) openPaymentFromHeader.addEventListener("click", () => {
+    state.selectedPlan = "5";
     state.paymentOpen = true;
     render();
+  });
+
+  document.querySelectorAll("[data-open-plan]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedPlan = button.dataset.openPlan || "5";
+      if (!state.currentUser) {
+        state.authMode = "signup";
+        alert("გამოწერისთვის ჯერ შექმენი ანგარიში ან გაიარე ავტორიზაცია.");
+        render();
+        return;
+      }
+      state.paymentOpen = true;
+      render();
+    });
   });
 
   const closePaymentModal = document.querySelector("#closePaymentModal");
@@ -854,6 +1067,10 @@ const bindEvents = () => {
 
   document.querySelectorAll("[data-deny]").forEach((button) => {
     button.addEventListener("click", () => approvePayment(Number(button.dataset.deny), "free"));
+  });
+
+  document.querySelectorAll("[data-suspend]").forEach((button) => {
+    button.addEventListener("click", () => suspendSubscription(Number(button.dataset.suspend)));
   });
 
   const openNewAuthorModal = document.querySelector("#openNewAuthorModal");
