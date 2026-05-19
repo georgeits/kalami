@@ -19,7 +19,10 @@ const state = {
   paymentOpen: false,
   selectedPlan: null,
   adminModalOpen: false,
+  adminModalMode: null,
   editAuthorId: null,
+  editWorkId: null,
+  receiptPreview: null,
   users: [],
   currentUser: null,
   pendingPayments: [],
@@ -41,14 +44,40 @@ const setData = (key, value) => localStorage.setItem(key, JSON.stringify(value))
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
+const slugify = (value) =>
+  String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\u10a0-\u10ff]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const normalizeWork = (work) => ({
+  ...work,
+  summary: work.summary || "",
+  characters: work.characters || "",
+  structure: work.structure || "",
+  questions: work.questions || work.context || "",
+  context: work.context || work.questions || "",
+});
+
+const normalizeLibrary = (library) =>
+  library.map((section) => ({
+    ...section,
+    authors: (section.authors || []).map((author) => ({
+      ...author,
+      era: author.era || section.category,
+      works: (author.works || []).map(normalizeWork),
+    })),
+  }));
+
 const hydrateLibrary = () => {
   const stored = getData(STORAGE_KEYS.library, null);
   if (!stored || !Array.isArray(stored) || !stored.length) {
-    const fresh = clone(curriculumData);
+    const fresh = normalizeLibrary(clone(curriculumData));
     setData(STORAGE_KEYS.library, fresh);
     return fresh;
   }
-  return stored;
+  return normalizeLibrary(stored);
 };
 
 const syncSessionUser = () => {
@@ -106,6 +135,17 @@ const getSelectedWork = () => {
   const author = getSelectedAuthor();
   if (!author || !state.selectedWorkId) return null;
   return author.works.find((work) => work.id === state.selectedWorkId) || null;
+};
+
+const closeAdminModalState = () => {
+  state.adminModalOpen = false;
+  state.adminModalMode = null;
+  state.editAuthorId = null;
+  state.editWorkId = null;
+};
+
+const closeReceiptPreview = () => {
+  state.receiptPreview = null;
 };
 
 const isPremium = () => state.currentUser && (state.currentUser.status === "premium" || state.currentUser.role === "admin");
@@ -199,6 +239,8 @@ const signOut = () => {
   state.dashboardTab = "library";
   state.selectedAuthorId = null;
   state.selectedWorkId = null;
+  closeAdminModalState();
+  closeReceiptPreview();
   localStorage.removeItem(STORAGE_KEYS.currentUser);
   render();
 };
@@ -283,7 +325,6 @@ const submitPayment = (event) => {
     id: Date.now(),
     userId: state.currentUser.id,
     email: state.currentUser.email,
-    password: state.currentUser.password,
     firstName: state.currentUser.firstName,
     lastName: state.currentUser.lastName,
     senderName,
@@ -344,17 +385,10 @@ const approvePayment = (paymentId, nextStatus) => {
     };
   });
 
-  state.pendingPayments = state.pendingPayments.map((item) => {
-    if (item.id !== paymentId) return item;
-    return {
-      ...item,
-      status: nextStatus === "premium" ? "approved" : "rejected",
-      approvedAt: nextStatus === "premium" ? approvedAt : null,
-      expiresAt: nextStatus === "premium" ? expiresAt : null,
-    };
-  });
+  state.pendingPayments = state.pendingPayments.filter((item) => item.id !== paymentId);
   persistPayments();
   persistUsers();
+  closeReceiptPreview();
 
   alert(
     nextStatus === "premium"
@@ -364,54 +398,30 @@ const approvePayment = (paymentId, nextStatus) => {
   render();
 };
 
-const suspendSubscription = (paymentId) => {
+const previewReceipt = (paymentId) => {
   const request = state.pendingPayments.find((item) => item.id === paymentId);
   if (!request) return;
-
-  state.users = state.users.map((user) =>
-    user.email !== request.email
-      ? user
-      : {
-          ...user,
-          status: "free",
-          subscriptionPlan: null,
-          subscriptionApprovedAt: null,
-          subscriptionExpiresAt: null,
-        }
-  );
-
-  state.pendingPayments = state.pendingPayments.map((item) =>
-    item.id !== paymentId
-      ? item
-      : {
-          ...item,
-          status: "suspended",
-          expiresAt: Date.now(),
-        }
-  );
-
-  persistPayments();
-  persistUsers();
-  alert("წვდომა შეჩერდა.");
+  state.receiptPreview = request;
   render();
 };
 
 const saveAuthor = (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const authorId = form.authorId.value.trim();
-  const categoryId = form.categoryId.value;
+  const editorData = state.editAuthorId ? getSelectedEditorData() : null;
+  const categoryId = form.categoryId?.value || editorData?.section?.id;
   const name = form.name.value.trim();
-  const bio = form.bio.value.trim();
+  const era = form.era.value.trim();
   const portrait = form.dataset.base64 || form.portraitUrl.value.trim();
-  const workTitle = form.workTitle.value.trim();
-  const workSummary = form.workSummary.value.trim();
-  const workCharacters = form.workCharacters.value.trim();
-  const workStructure = form.workStructure.value.trim();
-  const workContext = form.workContext.value.trim();
+  const authorId = state.editAuthorId || `${slugify(name) || "author"}-${Date.now()}`;
 
-  if (!name || !bio) {
-    alert("გთხოვთ შეავსოთ ავტორის სახელი და ბიოგრაფია.");
+  if (!name || !era) {
+    alert("გთხოვთ შეავსოთ ავტორის სახელი და ეპოქა.");
+    return;
+  }
+
+  if (!state.editAuthorId && !categoryId) {
+    alert("გთხოვთ აირჩიოთ კატეგორია.");
     return;
   }
 
@@ -420,52 +430,94 @@ const saveAuthor = (event) => {
       ...section,
       authors: section.authors.map((author) => {
         if (author.id !== state.editAuthorId) return author;
-        const updatedWorks = [...author.works];
-        if (workTitle) {
-          updatedWorks.push({
-            id: `${Date.now()}`,
-            title: workTitle,
-            summary: workSummary,
-            characters: workCharacters,
-            structure: workStructure,
-            context: workContext,
-          });
-        }
-        return { ...author, name, bio, portrait, works: updatedWorks };
+        return { ...author, name, era, portrait };
       }),
     }));
   } else {
-    const targetSection = state.library.find((section) => section.id === categoryId);
-    if (!targetSection) return;
-    targetSection.authors.push({
-      id: authorId || `author-${Date.now()}`,
-      name,
-      bio,
-      portrait,
-      works: workTitle
-        ? [
-            {
-              id: `work-${Date.now()}`,
-              title: workTitle,
-              summary: workSummary,
-              characters: workCharacters,
-              structure: workStructure,
-              context: workContext,
-            },
-          ]
-        : [],
-    });
+    state.library = state.library.map((section) =>
+      section.id !== categoryId
+        ? section
+        : {
+            ...section,
+            authors: [
+              ...section.authors,
+              {
+                id: authorId,
+                name,
+                era,
+                portrait,
+                works: [],
+              },
+            ],
+          }
+    );
+    state.selectedAuthorId = authorId;
+    state.selectedWorkId = null;
   }
 
   persistLibrary();
-  state.adminModalOpen = false;
-  state.editAuthorId = null;
-  alert("ცვლილებები შენახულია.");
+  closeAdminModalState();
+  alert("ავტორი წარმატებით შენახულია.");
   render();
 };
 
-const openAdminEditor = (authorId = null) => {
+const saveWork = (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const authorId = state.editAuthorId;
+  if (!authorId) return;
+
+  const title = form.title.value.trim();
+  const summary = form.summary.value.trim();
+  const characters = form.characters.value.trim();
+  const structure = form.structure.value.trim();
+  const questions = form.questions.value.trim();
+  const action = event.submitter?.dataset.action || "draft";
+
+  if (!title) {
+    alert("გთხოვთ შეავსოთ ნაწარმოების სათაური.");
+    return;
+  }
+
+  const workId = state.editWorkId || `${slugify(title) || "work"}-${Date.now()}`;
+  const nextWork = normalizeWork({
+    id: workId,
+    title,
+    summary,
+    characters,
+    structure,
+    questions,
+    context: questions,
+    visibility: action === "publish" ? "published" : "draft",
+    updatedAt: Date.now(),
+  });
+
+  state.library = state.library.map((section) => ({
+    ...section,
+    authors: section.authors.map((author) => {
+      if (author.id !== authorId) return author;
+      const existingIndex = author.works.findIndex((work) => work.id === workId);
+      if (existingIndex === -1) {
+        return { ...author, works: [...author.works, nextWork] };
+      }
+      const works = [...author.works];
+      works[existingIndex] = { ...works[existingIndex], ...nextWork };
+      return { ...author, works };
+    }),
+  }));
+
+  state.selectedAuthorId = authorId;
+  state.selectedWorkId = workId;
+  persistLibrary();
+  closeAdminModalState();
+  alert(action === "publish" ? "ნაწარმოები გამოქვეყნდა." : "ნაწარმოები შენახულია.");
+  render();
+};
+
+const openAdminEditor = (mode, authorId = null, workId = null) => {
+  state.adminModalMode = mode;
   state.editAuthorId = authorId;
+  state.editWorkId = workId;
   state.adminModalOpen = true;
   render();
 };
@@ -593,7 +645,14 @@ const renderLibraryGrid = () =>
               <span class="section-tag">${section.category}</span>
               <h3>${section.category}</h3>
             </div>
-            <span class="section-count">${section.authors.length} ავტორი</span>
+            <div class="section-actions">
+              <span class="section-count">${section.authors.length} ავტორი</span>
+              ${
+                isAdmin()
+                  ? `<button class="add-inline-btn" data-add-author="${section.id}" aria-label="ახალი ავტორი">+</button>`
+                  : ""
+              }
+            </div>
           </div>
           <div class="author-grid">
             ${section.authors
@@ -610,7 +669,7 @@ const renderLibraryGrid = () =>
                     </div>
                     <div>
                       <h4>${author.name}</h4>
-                      <p>${author.bio}</p>
+                      <p>${author.era || section.category}</p>
                     </div>
                   </div>
                   <div class="work-list">
@@ -640,10 +699,12 @@ const renderLibraryGrid = () =>
     .join("");
 
 const renderWorkPanel = () => {
-  const author = getSelectedAuthor();
+  const authorData = state.selectedAuthorId ? findAuthorById(state.selectedAuthorId) : null;
+  const author = authorData?.author || null;
+  const section = authorData?.section || null;
   const work = getSelectedWork();
 
-  if (!author || !work) {
+  if (!author) {
     return `
       <aside class="detail-panel empty-state">
         <h3>შეარჩიე ნაწარმოები</h3>
@@ -652,34 +713,77 @@ const renderWorkPanel = () => {
     `;
   }
 
+  if (!work) {
+    return `
+      <aside class="detail-panel">
+        <div class="detail-header admin-detail-head">
+          <div>
+            <span class="section-tag">${section?.category || "ავტორი"}</span>
+            <h3>${author.name}</h3>
+            <p class="detail-subtitle">${author.era || section?.category || ""}</p>
+          </div>
+          ${
+            isAdmin()
+              ? `<button class="accent-btn" data-add-work="${author.id}">+ ახალი ნაწარმოების დამატება</button>`
+              : ""
+          }
+        </div>
+        <div class="detail-block">
+          <h4>ნაწარმოებების სია</h4>
+          <p>აირჩიე უკვე დამატებული ტექსტი ან დაამატე ახალი ნაწარმოები ადმინისტრაციული პანელიდან.</p>
+          <div class="work-list">
+            ${author.works
+              .map(
+                (item) => `
+                  <button class="work-chip" data-author="${author.id}" data-work="${item.id}">
+                    ${item.title}
+                  </button>
+                `
+              )
+              .join("")}
+          </div>
+        </div>
+      </aside>
+    `;
+  }
+
   return `
     <aside class="detail-panel ${!isPremium() ? "blurred" : ""}">
-      <div class="detail-header">
+      <div class="detail-header admin-detail-head">
         <div>
           <span class="section-tag">${author.name}</span>
           <h3>${work.title}</h3>
+          <p class="detail-subtitle">${author.era || section?.category || ""}</p>
         </div>
-        ${
-          !isPremium()
-            ? `<button class="accent-btn" id="openPaymentFromHeader">💳 ქვითრის ატვირთვა</button>`
-            : ""
-        }
+        <div class="detail-actions">
+          ${
+            isAdmin()
+              ? `<button class="secondary-btn" data-edit-work="${author.id}|${work.id}">რედაქტირება</button>
+                 <button class="accent-btn" data-add-work="${author.id}">+ ახალი ნაწარმოების დამატება</button>`
+              : ""
+          }
+          ${
+            !isPremium()
+              ? `<button class="accent-btn" id="openPaymentFromHeader">💳 ქვითრის ატვირთვა</button>`
+              : ""
+          }
+        </div>
       </div>
       <div class="detail-block">
-        <h4>მოკლე შინაარსი</h4>
+        <h4>შინაარსი</h4>
         <p>${work.summary}</p>
       </div>
       <div class="detail-block">
-        <h4>პერსონაჟები</h4>
+        <h4>პერსონაჟთა დახასიათება</h4>
         <p>${work.characters}</p>
       </div>
       <div class="detail-block">
-        <h4>სტრუქტურა</h4>
+        <h4>გეგმა და სტრუქტურა</h4>
         <p>${work.structure}</p>
       </div>
       <div class="detail-block">
-        <h4>ისტორიული კონტექსტი</h4>
-        <p>${work.context}</p>
+        <h4>გასაანალიზებელი კითხვები</h4>
+        <p>${work.questions || work.context}</p>
       </div>
       ${
         state.paywallOpen && !isPremium()
@@ -760,7 +864,6 @@ const paymentsMarkup = () => `
   <section class="payments-shell">
     ${(() => {
       const pendingRequests = state.pendingPayments.filter((payment) => payment.status === "pending");
-      const processedRequests = state.pendingPayments.filter((payment) => payment.status !== "pending");
       return `
     <div class="library-header">
       <div>
@@ -770,67 +873,33 @@ const paymentsMarkup = () => `
       <div class="status-pill pending">${pendingRequests.length} მოთხოვნა</div>
     </div>
     <div class="payments-section">
-      <h3>მოსული მოთხოვნები</h3>
-      <div class="payments-grid">
+      <h3>მოსული გადახდების გადამოწმება</h3>
+      <div class="payments-table-wrap">
       ${
         pendingRequests.length
           ? pendingRequests
-              .map(
-                (payment) => `
-                  <article class="payment-card">
+              .map((payment) => `
+                <article class="payment-row">
+                  <div>
+                    <strong>${payment.firstName} ${payment.lastName}</strong>
+                    <p>${payment.senderName}</p>
+                  </div>
+                  <div>
+                    <strong>${payment.email}</strong>
+                    <p>${getPlanName(payment.planId)}</p>
+                  </div>
+                  <button class="receipt-thumb-btn" data-preview-receipt="${payment.id}">
                     <img src="${payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
-                    <div class="payment-meta">
-                      <h3>${payment.senderName}</h3>
-                      <p>${payment.firstName} ${payment.lastName}</p>
-                      <p>${payment.email}</p>
-                      <p>პაროლი: ${payment.password}</p>
-                      <p>გეგმა: ${getPlanName(payment.planId)}</p>
-                    </div>
-                    <div class="payment-actions">
-                      <button class="primary-btn" data-approve="${payment.id}">დამტკიცება</button>
-                      <button class="secondary-btn" data-deny="${payment.id}">უარყოფა</button>
-                    </div>
-                  </article>
-                `
-              )
+                    <span>ქვითრის გახსნა</span>
+                  </button>
+                  <div class="payment-actions">
+                    <button class="primary-btn" data-approve="${payment.id}">დამტკიცება</button>
+                    <button class="secondary-btn" data-deny="${payment.id}">უარყოფა</button>
+                  </div>
+                </article>
+              `)
               .join("")
           : `<div class="empty-payments">ამ ეტაპზე ახალი გადახდის მოთხოვნები არ არის.</div>`
-      }
-      </div>
-    </div>
-    <div class="payments-section">
-      <h3>დამუშავებული გამოწერები</h3>
-      <div class="payments-grid">
-      ${
-        processedRequests.length
-          ? processedRequests
-              .map(
-                (payment) => `
-                  <article class="payment-card">
-                    <img src="${payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
-                    <div class="payment-meta">
-                      <h3>${payment.senderName}</h3>
-                      <p>${payment.firstName} ${payment.lastName}</p>
-                      <p>${payment.email}</p>
-                      <p>პაროლი: ${payment.password}</p>
-                      <p>გეგმა: ${getPlanName(payment.planId)}</p>
-                      <p>სტატუსი: ${payment.status}</p>
-                      <p>დამტკიცდა: ${formatDate(payment.approvedAt)}</p>
-                      <p>იწურება: ${formatDate(payment.expiresAt)}</p>
-                      <p>დარჩენილი დღეები: ${payment.expiresAt ? getDaysLeft(payment.expiresAt) : 0}</p>
-                    </div>
-                    <div class="payment-actions">
-                      ${
-                        payment.status === "approved"
-                          ? `<button class="secondary-btn" data-suspend="${payment.id}">წვდომის შეჩერება</button>`
-                          : ""
-                      }
-                    </div>
-                  </article>
-                `
-              )
-              .join("")
-          : `<div class="empty-payments">ჯერ დამუშავებული გამოწერები არ არის.</div>`
       }
       </div>
     </div>
@@ -881,10 +950,56 @@ const paymentModalMarkup = () => {
 const adminModalMarkup = () => {
   if (!state.adminModalOpen) return "";
   const selected = state.editAuthorId ? getSelectedEditorData() : null;
+  const selectedWork =
+    state.editAuthorId && state.editWorkId
+      ? selected?.author.works.find((work) => work.id === state.editWorkId) || null
+      : null;
+
+  if (state.adminModalMode === "work") {
+    return `
+      <div class="modal-backdrop">
+        <div class="modal-card large">
+          <div class="modal-head">
+            <div>
+              <span class="section-tag">${state.editWorkId ? "რედაქტირება" : "ახალი ტექსტი"}</span>
+              <h3>${state.editWorkId ? "ნაწარმოების რედაქტირება" : "ახალი ნაწარმოების დამატება"}</h3>
+            </div>
+            <button class="icon-button" id="closeAdminModal">✕</button>
+          </div>
+          <form id="workForm" class="stack-form">
+            <label>
+              <span>ნაწარმოების სათაური</span>
+              <input name="title" type="text" value="${selectedWork?.title || ""}" required />
+            </label>
+            <label>
+              <span>შინაარსი</span>
+              <textarea name="summary" rows="4">${selectedWork?.summary || ""}</textarea>
+            </label>
+            <label>
+              <span>პერსონაჟთა დახასიათება</span>
+              <textarea name="characters" rows="4">${selectedWork?.characters || ""}</textarea>
+            </label>
+            <label>
+              <span>გეგმა და სტრუქტურა</span>
+              <textarea name="structure" rows="4">${selectedWork?.structure || ""}</textarea>
+            </label>
+            <label>
+              <span>გასაანალიზებელი კითხვები</span>
+              <textarea name="questions" rows="4">${selectedWork?.questions || selectedWork?.context || ""}</textarea>
+            </label>
+            <div class="modal-action-row">
+              <button type="submit" class="secondary-btn" data-action="draft">შენახვა</button>
+              <button type="submit" class="primary-btn" data-action="publish">გამოქვეყნება</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
 
   return `
     <div class="modal-backdrop">
-      <div class="modal-card large">
+      <div class="modal-card">
         <div class="modal-head">
           <div>
             <span class="section-tag">${state.editAuthorId ? "რედაქტირება" : "ახალი ჩანაწერი"}</span>
@@ -892,27 +1007,32 @@ const adminModalMarkup = () => {
           </div>
           <button class="icon-button" id="closeAdminModal">✕</button>
         </div>
-        <form id="authorForm" class="stack-form two-column">
-          <input type="hidden" name="authorId" value="${selected?.author.id || ""}" />
+        <form id="authorForm" class="stack-form">
+          ${
+            state.editAuthorId
+              ? ""
+              : `
+                <label>
+                  <span>კატეგორია</span>
+                  <select name="categoryId">
+                    ${state.library
+                      .map(
+                        (section) => `
+                          <option value="${section.id}" ${selected?.section.id === section.id ? "selected" : ""}>${section.category}</option>
+                        `
+                      )
+                      .join("")}
+                  </select>
+                </label>
+              `
+          }
           <label>
-            <span>კატეგორია</span>
-            <select name="categoryId" ${state.editAuthorId ? "disabled" : ""}>
-              ${state.library
-                .map(
-                  (section) => `
-                    <option value="${section.id}" ${selected?.section.id === section.id ? "selected" : ""}>${section.category}</option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
-          <label>
-            <span>ავტორის სახელი</span>
+            <span>ავტორის სახელი და გვარი</span>
             <input name="name" type="text" value="${selected?.author.name || ""}" required />
           </label>
-          <label class="full-span">
-            <span>ბიოგრაფია</span>
-            <textarea name="bio" rows="4" required>${selected?.author.bio || ""}</textarea>
+          <label>
+            <span>ეპოქა</span>
+            <input name="era" type="text" value="${selected?.author.era || selected?.section.category || ""}" required />
           </label>
           <label>
             <span>პორტრეტის URL</span>
@@ -923,28 +1043,30 @@ const adminModalMarkup = () => {
             <input name="portraitFile" id="portraitInput" type="file" accept="image/*" />
             <small class="file-chip">ატვირთვა სურვილისამებრ</small>
           </label>
-          <label>
-            <span>ახალი ნაწარმოების სათაური</span>
-            <input name="workTitle" type="text" />
-          </label>
-          <label>
-            <span>პერსონაჟები</span>
-            <input name="workCharacters" type="text" />
-          </label>
-          <label class="full-span">
-            <span>მოკლე შინაარსი</span>
-            <textarea name="workSummary" rows="3"></textarea>
-          </label>
-          <label>
-            <span>სტრუქტურა</span>
-            <textarea name="workStructure" rows="3"></textarea>
-          </label>
-          <label>
-            <span>ისტორიული კონტექსტი</span>
-            <textarea name="workContext" rows="3"></textarea>
-          </label>
-          <button type="submit" class="primary-btn full-span">შენახვა</button>
+          <button type="submit" class="primary-btn">შენახვა</button>
         </form>
+      </div>
+    </div>
+  `;
+};
+
+const receiptPreviewMarkup = () => {
+  if (!state.receiptPreview) return "";
+  return `
+    <div class="modal-backdrop">
+      <div class="modal-card receipt-modal">
+        <div class="modal-head">
+          <div>
+            <span class="section-tag premium-lock">ქვითრის გადამოწმება</span>
+            <h3>${state.receiptPreview.firstName} ${state.receiptPreview.lastName}</h3>
+          </div>
+          <button class="icon-button" id="closeReceiptPreview">✕</button>
+        </div>
+        <div class="receipt-preview-meta">
+          <p><strong>ელ-ფოსტა:</strong> ${state.receiptPreview.email}</p>
+          <p><strong>გეგმა:</strong> ${getPlanName(state.receiptPreview.planId)}</p>
+        </div>
+        <img src="${state.receiptPreview.screenshot}" alt="ქვითარი" class="receipt-preview-image" />
       </div>
     </div>
   `;
@@ -962,6 +1084,7 @@ const dashboardMarkup = () => `
     </main>
     ${paymentModalMarkup()}
     ${adminModalMarkup()}
+    ${receiptPreviewMarkup()}
   </div>
 `;
 
@@ -1069,21 +1192,45 @@ const bindEvents = () => {
     button.addEventListener("click", () => approvePayment(Number(button.dataset.deny), "free"));
   });
 
-  document.querySelectorAll("[data-suspend]").forEach((button) => {
-    button.addEventListener("click", () => suspendSubscription(Number(button.dataset.suspend)));
+  const openNewAuthorModal = document.querySelector("#openNewAuthorModal");
+  if (openNewAuthorModal) openNewAuthorModal.addEventListener("click", () => openAdminEditor("author"));
+
+  document.querySelectorAll("[data-add-author]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sectionId = button.dataset.addAuthor;
+      state.selectedAuthorId = null;
+      state.selectedWorkId = null;
+      state.editAuthorId = null;
+      state.adminModalMode = "author";
+      state.adminModalOpen = true;
+      render();
+      const categoryField = document.querySelector('#authorForm select[name="categoryId"]');
+      if (categoryField && sectionId) categoryField.value = sectionId;
+    });
   });
 
-  const openNewAuthorModal = document.querySelector("#openNewAuthorModal");
-  if (openNewAuthorModal) openNewAuthorModal.addEventListener("click", () => openAdminEditor());
-
   document.querySelectorAll("[data-edit-author]").forEach((button) => {
-    button.addEventListener("click", () => openAdminEditor(button.dataset.editAuthor));
+    button.addEventListener("click", () => openAdminEditor("author", button.dataset.editAuthor));
+  });
+
+  document.querySelectorAll("[data-add-work]").forEach((button) => {
+    button.addEventListener("click", () => openAdminEditor("work", button.dataset.addWork));
+  });
+
+  document.querySelectorAll("[data-edit-work]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [authorId, workId] = button.dataset.editWork.split("|");
+      openAdminEditor("work", authorId, workId);
+    });
+  });
+
+  document.querySelectorAll("[data-preview-receipt]").forEach((button) => {
+    button.addEventListener("click", () => previewReceipt(Number(button.dataset.previewReceipt)));
   });
 
   const closeAdminModal = document.querySelector("#closeAdminModal");
   if (closeAdminModal) closeAdminModal.addEventListener("click", () => {
-    state.adminModalOpen = false;
-    state.editAuthorId = null;
+    closeAdminModalState();
     render();
   });
 
@@ -1095,6 +1242,15 @@ const bindEvents = () => {
       portraitInput.addEventListener("change", () => handleFileChange(portraitInput, authorForm));
     }
   }
+
+  const workForm = document.querySelector("#workForm");
+  if (workForm) workForm.addEventListener("submit", saveWork);
+
+  const closeReceiptPreviewBtn = document.querySelector("#closeReceiptPreview");
+  if (closeReceiptPreviewBtn) closeReceiptPreviewBtn.addEventListener("click", () => {
+    closeReceiptPreview();
+    render();
+  });
 };
 
 initState();
