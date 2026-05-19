@@ -157,6 +157,30 @@ const normalizeAuthorsMap = (payload) => {
     );
   }
 
+  const looksLikeDirectAuthorsMap =
+    !Array.isArray(payload) &&
+    Object.values(payload).some(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        ("name" in item || "bio" in item || "works" in item || "image" in item || "portrait" in item)
+    );
+
+  if (looksLikeDirectAuthorsMap) {
+    return Object.fromEntries(
+      Object.entries(payload).map(([authorId, author]) => [
+        authorId,
+        {
+          name: author.name || "",
+          bio: author.bio || "",
+          image: author.image || author.portrait || "",
+          era: author.era || "",
+          works: normalizeWorkMap(author.works),
+        },
+      ])
+    );
+  }
+
   if (Array.isArray(payload)) {
     const authors = payload.flatMap((section) =>
       (section.authors || []).map((author) => [
@@ -336,6 +360,7 @@ const openAuthorsDirectory = () => {
 };
 
 const openAuthorDetail = (authorId) => {
+  if (!authorId) return;
   state.currentView = "author-detail";
   state.selectedAuthorId = authorId;
   state.selectedWorkId = null;
@@ -343,6 +368,7 @@ const openAuthorDetail = (authorId) => {
 };
 
 const openWorkEditor = (authorId, workId) => {
+  if (!authorId || !workId) return;
   state.currentView = "work-editor";
   state.selectedAuthorId = authorId;
   state.selectedWorkId = workId;
@@ -953,12 +979,12 @@ const renderAuthorsMainDirectory = () => {
                         <div class="avatar-wrap">
                           ${
                             author.image
-                              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
+                              ? `<img src="${author.image}" alt="${author.name || "ავტორი"}" class="avatar-img" />`
                               : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
                           }
                         </div>
                         <div>
-                          <h4>${author.name || "უცნობი ავტორი"}</h4>
+                          <h4>${author.name || "ავტორი"}</h4>
                           <p>${author.era || "ავტორი"}</p>
                         </div>
                       </div>
@@ -976,8 +1002,18 @@ const renderAuthorsMainDirectory = () => {
 
 const renderAuthorDetailPage = () => {
   const author = getSelectedAuthor();
+  if (state.curriculumLoading) {
+    return `<section class="library-shell"><div class="sync-banner">ინფორმაცია იტვირთება...</div></section>`;
+  }
   if (!author) {
-    return `<section class="library-shell"><div class="empty-payments">ავტორი ვერ მოიძებნა.</div></section>`;
+    return `
+      <section class="library-shell">
+        <div class="cms-header-row">
+          <button class="secondary-btn" data-back-authors>უკან</button>
+        </div>
+        <div class="empty-payments">ინფორმაცია იტვირთება...</div>
+      </section>
+    `;
   }
 
   const works = Object.entries(author.works || {}).map(([id, work]) => ({ id, ...work }));
@@ -1025,8 +1061,18 @@ const renderAuthorDetailPage = () => {
 const renderWorkEditorPage = () => {
   const author = getSelectedAuthor();
   const work = getSelectedWork();
+  if (state.curriculumLoading) {
+    return `<section class="library-shell"><div class="sync-banner">ინფორმაცია იტვირთება...</div></section>`;
+  }
   if (!author || !work) {
-    return `<section class="library-shell"><div class="empty-payments">ნაწარმოები ვერ მოიძებნა.</div></section>`;
+    return `
+      <section class="library-shell">
+        <div class="cms-header-row">
+          <button class="secondary-btn" data-back-author>უკან</button>
+        </div>
+        <div class="empty-payments">ინფორმაცია იტვირთება...</div>
+      </section>
+    `;
   }
 
   const chapters = Object.entries(work.chapters || {}).map(([id, chapter]) => ({ id, ...chapter }));
@@ -1128,12 +1174,12 @@ const renderStudentLibrary = () => {
                         <div class="avatar-wrap">
                           ${
                             author.image
-                              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
+                              ? `<img src="${author.image}" alt="${author.name || "ავტორი"}" class="avatar-img" />`
                               : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
                           }
                         </div>
                         <div>
-                          <h4>${author.name}</h4>
+                          <h4>${author.name || "ავტორი"}</h4>
                           <p>${author.era || "ავტორი"}</p>
                         </div>
                       </div>
@@ -1432,12 +1478,17 @@ const bindEvents = () => {
   if (logoutBtn) logoutBtn.addEventListener("click", signOut);
 
   document.querySelectorAll("[data-open-author]").forEach((button) => {
-    button.addEventListener("click", () => openAuthorDetail(button.dataset.openAuthor));
+    button.addEventListener("click", () => {
+      const authorId = button.dataset.openAuthor;
+      if (!authorId) return;
+      openAuthorDetail(authorId);
+    });
   });
 
   document.querySelectorAll("[data-open-work]").forEach((button) => {
     button.addEventListener("click", () => {
       const [authorId, workId] = button.dataset.openWork.split("|");
+      if (!authorId || !workId) return;
       openWorkEditor(authorId, workId);
     });
   });
