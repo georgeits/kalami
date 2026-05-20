@@ -1,1641 +1,835 @@
-import { curriculumData, defaultUserStatus } from "./data.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  collection,
+  addDoc,
+  query,
+  onSnapshot,
+  serverTimestamp,
+  getDocs,
+  writeBatch,
+  orderBy,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getStorage,
+  ref,
+  uploadBytes,
+  getDownloadURL,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import {
+  ADMIN_EMAIL,
+  BANK_ACCOUNT,
+  SUBSCRIPTION_DAYS,
+  packageCatalog,
+  seedAuthors,
+  defaultFirebaseConfig,
+} from "./data.js";
 
-const STORAGE_KEYS = {
-  users: "users",
-  currentUser: "currentUser",
-  pendingPayments: "pendingPayments",
-};
-
-const ADMIN_EMAIL = "giorgijavakhishvili75@gmail.com";
-const FIREBASE_CURRICULUM_PATH = "curriculum";
-const FIREBASE_PENDING_PAYMENTS_PATH = "pendingPayments";
-const FIREBASE_USERS_PATH = "users";
-const firebaseConfig = {
-  apiKey: "AIzaSyDfHIssC0SbMkaADtLE64Y28DbjWzLoiJU",
-  authDomain: "kalami-fe323.firebaseapp.com",
-  databaseURL: "https://kalami-fe323-default-rtdb.firebaseio.com",
-  projectId: "kalami-fe323",
-  storageBucket: "kalami-fe323.firebasestorage.app",
-  messagingSenderId: "1831718779",
-  appId: "1:1831718779:web:d15a1ca6d0a4ee1a0577de",
-  measurementId: "G-NFKNZX6K6S",
-};
+const appRoot = document.querySelector("#app");
+const THEME_KEY = "mitosi-theme";
 
 const state = {
-  route: "landing",
-  authMode: "signup",
-  dashboardTab: "library",
-  currentView: "authors-main",
+  bootError: "",
+  authReady: false,
+  user: null,
+  userProfile: null,
+  authors: [],
   selectedAuthorId: null,
   selectedWorkId: null,
-  paywallOpen: false,
-  paymentOpen: false,
-  selectedPlan: null,
-  adminModalOpen: false,
-  adminModalMode: null,
-  editAuthorId: null,
-  editWorkId: null,
-  receiptPreview: null,
+  selectedTab: "summary",
+  currentScreen: "landing",
+  authMode: "login",
+  selectedPlan: packageCatalog[0].id,
+  payments: [],
   users: [],
-  currentUser: null,
-  pendingPayments: [],
-  library: [],
-  curriculumLoading: true,
-  curriculumError: "",
-  paymentsError: "",
+  loading: {
+    authors: true,
+    payments: true,
+  },
 };
 
-const app = document.querySelector("#app");
-const firebaseNamespace = window.firebase;
-let currentUserRef = null;
-let currentUserListener = null;
+const firebaseConfig = window.MITOSI_FIREBASE_CONFIG || defaultFirebaseConfig;
+const hasValidFirebaseConfig = !Object.values(firebaseConfig).some((value) => String(value).startsWith("PASTE_"));
 
-if (!firebaseNamespace) {
-  state.curriculumLoading = false;
-  state.curriculumError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
+let firebaseApp;
+let auth;
+let db;
+let storage;
+
+if (hasValidFirebaseConfig) {
+  firebaseApp = initializeApp(firebaseConfig);
+  auth = getAuth(firebaseApp);
+  db = getFirestore(firebaseApp);
+  storage = getStorage(firebaseApp);
+} else {
+  state.bootError = "Firebase კონფიგურაცია არ არის შევსებული. `data.js`-ში ან `window.MITOSI_FIREBASE_CONFIG`-ით ჩასვი პროექტის პარამეტრები.";
 }
 
-if (firebaseNamespace && !firebaseNamespace.apps.length) {
-  firebaseNamespace.initializeApp(firebaseConfig);
-}
+const formatDate = (value) =>
+  value
+    ? new Date(value).toLocaleString("ka-GE", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";
 
-const database = firebaseNamespace ? firebaseNamespace.database() : null;
-const curriculumRef = database ? database.ref(FIREBASE_CURRICULUM_PATH) : null;
-const usersRootRef = database ? database.ref(FIREBASE_USERS_PATH) : null;
-const pendingPaymentsRootRef = database ? database.ref(FIREBASE_PENDING_PAYMENTS_PATH) : null;
+const escapeHtml = (value = "") =>
+  String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 
-const getData = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
+const setTheme = (theme) => {
+  const dark = theme === "dark";
+  document.body.classList.toggle("dark", dark);
+  localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
+};
+
+const initTheme = () => {
+  const saved = localStorage.getItem(THEME_KEY);
+  setTheme(saved || "light");
+};
+
+const roleOf = (email) => (email === ADMIN_EMAIL ? "admin" : "student");
+
+const ensureUserProfile = async (firebaseUser) => {
+  const userRef = doc(db, "users", firebaseUser.uid);
+  const snapshot = await getDoc(userRef);
+
+  if (!snapshot.exists()) {
+    await setDoc(userRef, {
+      uid: firebaseUser.uid,
+      email: firebaseUser.email,
+      fullName: firebaseUser.displayName || "",
+      role: roleOf(firebaseUser.email),
+      status: roleOf(firebaseUser.email) === "admin" ? "active" : "inactive",
+      selectedPlan: null,
+      subscriptionStartedAt: null,
+      subscriptionExpiresAt: null,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } else if (snapshot.data().role !== roleOf(firebaseUser.email)) {
+    await updateDoc(userRef, {
+      role: roleOf(firebaseUser.email),
+      updatedAt: serverTimestamp(),
+    });
   }
 };
 
-const setData = (key, value) => localStorage.setItem(key, JSON.stringify(value));
+const ensureSeedData = async () => {
+  const authorsRef = collection(db, "authors");
+  const authorsSnap = await getDocs(authorsRef);
+  if (!authorsSnap.empty) return;
 
-const clone = (value) => JSON.parse(JSON.stringify(value));
+  const batch = writeBatch(db);
+  seedAuthors.forEach((author) => {
+    const authorRef = doc(db, "authors", author.id);
+    batch.set(authorRef, {
+      id: author.id,
+      name: author.name,
+      era: author.era,
+      bio: author.bio,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
 
-const slugify = (value) =>
-  String(value || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\u10a0-\u10ff]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    author.works.forEach((work) => {
+      const workRef = doc(db, "authors", author.id, "works", work.id);
+      batch.set(workRef, {
+        ...work,
+        authorId: author.id,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  });
 
-const normalizeWork = (work) => ({
-  ...work,
-  title: work.title || "",
-  summary: work.summary || "",
-  characters: work.characters || "",
-  structure: work.structure || "",
-  questions: work.questions || work.context || "",
-  context: work.context || work.questions || "",
-});
-
-const normalizeWorkMap = (works) => {
-  if (!works) return {};
-  if (Array.isArray(works)) {
-    return Object.fromEntries(
-      works.map((work) => [
-        work.id || slugify(`${work.title || "work"}-${Date.now()}`),
-        {
-          title: work.title || "",
-          chapters: work.summary
-            ? {
-                summary: {
-                  title: "შინაარსი",
-                  content: work.summary,
-                },
-              }
-            : {},
-          characters: typeof work.characters === "string"
-            ? {
-                default: {
-                  name: "პერსონაჟები",
-                  description: work.characters,
-                },
-              }
-            : work.characters || {},
-          structure: work.structure || "",
-          questions: work.questions || work.context || "",
-        },
-      ])
-    );
-  }
-
-  return Object.fromEntries(
-    Object.entries(works).map(([workId, work]) => [
-      workId,
-      {
-        title: work.title || "",
-        chapters: work.chapters || {},
-        characters: work.characters || {},
-        structure: work.structure || "",
-        questions: work.questions || "",
-      },
-    ])
-  );
+  await batch.commit();
 };
 
-const normalizeAuthorsMap = (payload) => {
-  if (!payload) return {};
+const syncExpiryIfNeeded = async (profile) => {
+  if (!profile?.subscriptionExpiresAt || profile.status !== "active") return profile;
+  const expiry =
+    typeof profile.subscriptionExpiresAt?.toDate === "function"
+      ? profile.subscriptionExpiresAt.toDate().getTime()
+      : new Date(profile.subscriptionExpiresAt).getTime();
 
-  if (payload.authors && !Array.isArray(payload.authors)) {
-    return Object.fromEntries(
-      Object.entries(payload.authors).map(([authorId, author]) => [
-        authorId,
-        {
-          name: author.name || "",
-          bio: author.bio || "",
-          image: author.image || author.portrait || "",
-          era: author.era || "",
-          works: normalizeWorkMap(author.works),
-        },
-      ])
-    );
-  }
+  if (Date.now() < expiry) return profile;
 
-  const looksLikeDirectAuthorsMap =
-    !Array.isArray(payload) &&
-    Object.values(payload).some(
-      (item) =>
-        item &&
-        typeof item === "object" &&
-        ("name" in item || "bio" in item || "works" in item || "image" in item || "portrait" in item)
-    );
+  await updateDoc(doc(db, "users", profile.uid), {
+    status: "inactive",
+    selectedPlan: null,
+    updatedAt: serverTimestamp(),
+  });
 
-  if (looksLikeDirectAuthorsMap) {
-    return Object.fromEntries(
-      Object.entries(payload).map(([authorId, author]) => [
-        authorId,
-        {
-          name: author.name || "",
-          bio: author.bio || "",
-          image: author.image || author.portrait || "",
-          era: author.era || "",
-          works: normalizeWorkMap(author.works),
-        },
-      ])
-    );
-  }
-
-  if (Array.isArray(payload)) {
-    const authors = payload.flatMap((section) =>
-      (section.authors || []).map((author) => [
-        author.id || slugify(author.name),
-        {
-          name: author.name || "",
-          bio: author.bio || "",
-          image: author.image || author.portrait || "",
-          era: author.era || section.category || "",
-          works: normalizeWorkMap(author.works),
-        },
-      ])
-    );
-    return Object.fromEntries(authors);
-  }
-
-  return {};
+  return { ...profile, status: "inactive", selectedPlan: null };
 };
 
-const getDefaultAuthorsMap = () => normalizeAuthorsMap(clone(curriculumData));
+const subscribeAppData = () => {
+  onSnapshot(collection(db, "authors"), async (snapshot) => {
+    const authorDocs = snapshot.docs.map((item) => item.data());
+    const worksPromises = authorDocs.map(async (author) => {
+      const workSnap = await getDocs(collection(db, "authors", author.id, "works"));
+      return {
+        ...author,
+        works: workSnap.docs.map((work) => work.data()),
+      };
+    });
 
-const hasRenderableAuthors = (authorsMap) =>
-  !!authorsMap &&
-  Object.keys(authorsMap).length > 0 &&
-  Object.values(authorsMap).some(
-    (author) =>
-      author &&
-      typeof author === "object" &&
-      (author.name || author.bio || author.image || author.portrait || author.works)
-  );
+    state.authors = await Promise.all(worksPromises);
+    if (!state.selectedAuthorId && state.authors[0]) {
+      state.selectedAuthorId = state.authors[0].id;
+      state.selectedWorkId = state.authors[0].works[0]?.id || null;
+    }
+    state.loading.authors = false;
+    render();
+  });
 
-const getUserRef = (userId) => (usersRootRef && userId ? usersRootRef.child(String(userId)) : null);
-const getPendingPaymentRef = (userId) =>
-  pendingPaymentsRootRef && userId ? pendingPaymentsRootRef.child(String(userId)) : null;
+  const paymentQuery = query(collection(db, "payments"), orderBy("createdAt", "desc"));
+  onSnapshot(paymentQuery, (snapshot) => {
+    state.payments = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+    state.loading.payments = false;
+    render();
+  });
 
-const mergeUserIntoLocalState = (user) => {
-  const normalizedUser = attachRole(user, true);
-  const existingIndex = state.users.findIndex((item) => String(item.id) === String(normalizedUser.id));
-  if (existingIndex === -1) {
-    state.users.push(normalizedUser);
-  } else {
-    state.users[existingIndex] = { ...state.users[existingIndex], ...normalizedUser };
-  }
-  if (state.currentUser && String(state.currentUser.id) === String(normalizedUser.id)) {
-    state.currentUser = { ...state.currentUser, ...normalizedUser };
-    setData(STORAGE_KEYS.currentUser, state.currentUser);
-  }
-  persistUsers();
-};
-
-const syncUserProfileToCloud = async (user) => {
-  const userRef = getUserRef(user.id);
-  if (!userRef) return;
-  await userRef.update({
-    id: user.id,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    email: user.email,
-    password: user.password,
-    status: user.status,
-    subscriptionPlan: user.subscriptionPlan || null,
-    subscriptionApprovedAt: user.subscriptionApprovedAt || null,
-    subscriptionExpiresAt: user.subscriptionExpiresAt || null,
-    role: attachRole(user, true).role,
+  const userQuery = query(collection(db, "users"));
+  onSnapshot(userQuery, async (snapshot) => {
+    state.users = snapshot.docs.map((item) => item.data());
+    if (state.user) {
+      const profile = state.users.find((item) => item.uid === state.user.uid) || null;
+      state.userProfile = profile ? await syncExpiryIfNeeded(profile) : null;
+      state.currentScreen = state.userProfile?.role === "admin" ? "admin" : "dashboard";
+    }
+    render();
   });
 };
 
-const unsubscribeCurrentUserNode = () => {
-  if (currentUserRef && currentUserListener) {
-    currentUserRef.off("value", currentUserListener);
-  }
-  currentUserRef = null;
-  currentUserListener = null;
-};
-
-const subscribeCurrentUserNode = (userId) => {
-  unsubscribeCurrentUserNode();
-  const userRef = getUserRef(userId);
-  if (!userRef) return;
-  currentUserRef = userRef;
-  currentUserListener = (snapshot) => {
-    const cloudUser = snapshot.val();
-    if (!cloudUser) return;
-    mergeUserIntoLocalState(cloudUser);
-    render();
-  };
-  userRef.on("value", currentUserListener);
-};
-
-const syncSessionUser = () => {
-  if (!state.currentUser) return;
-  const match = state.users.find((user) => user.email === state.currentUser.email);
-  if (!match) {
-    state.currentUser = null;
-    localStorage.removeItem(STORAGE_KEYS.currentUser);
-    return;
-  }
-  state.currentUser = attachRole(match, true);
-  setData(STORAGE_KEYS.currentUser, state.currentUser);
-};
-
-const attachRole = (user, enableAdminHook = false) => ({
-  ...user,
-  role: enableAdminHook && user.email === ADMIN_EMAIL ? "admin" : user.role || "student",
-});
-
-const initState = () => {
-  state.users = getData(STORAGE_KEYS.users, []);
-  state.pendingPayments = [];
-  state.library = getDefaultAuthorsMap();
-  refreshSubscriptionStatuses();
-  const existingUser = getData(STORAGE_KEYS.currentUser, null);
-  state.currentUser = existingUser ? attachRole(existingUser, true) : null;
-  syncSessionUser();
-  if (state.currentUser) {
-    state.route = "dashboard";
-    subscribeCurrentUserNode(state.currentUser.id);
-  }
-};
-
-const persistUsers = () => {
-  setData(STORAGE_KEYS.users, state.users);
-  syncSessionUser();
-};
-
-const findAuthorById = (authorId) => {
-  const author = state.library?.[authorId];
-  return author ? { authorId, author } : null;
-};
-
-const getSelectedAuthor = () => {
-  if (!state.selectedAuthorId) return null;
-  return findAuthorById(state.selectedAuthorId)?.author || null;
-};
-
+const getSelectedAuthor = () => state.authors.find((author) => author.id === state.selectedAuthorId) || null;
 const getSelectedWork = () => {
   const author = getSelectedAuthor();
-  if (!author || !state.selectedWorkId) return null;
-  const work = author.works?.[state.selectedWorkId];
-  return work ? { id: state.selectedWorkId, ...work } : null;
+  return author?.works?.find((work) => work.id === state.selectedWorkId) || author?.works?.[0] || null;
 };
 
-const closeAdminModalState = () => {
-  state.adminModalOpen = false;
-  state.adminModalMode = null;
-  state.editAuthorId = null;
-  state.editWorkId = null;
+const countdownText = () => {
+  const expiryRaw = state.userProfile?.subscriptionExpiresAt;
+  if (!expiryRaw || state.userProfile?.status !== "active") return "გამოწერა არაა აქტიური";
+  const expiry = typeof expiryRaw?.toDate === "function" ? expiryRaw.toDate().getTime() : new Date(expiryRaw).getTime();
+  const diff = expiry - Date.now();
+  if (diff <= 0) return "ვადა დასრულდა";
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  return `${days} დღე • ${hours} სთ • ${minutes} წთ`;
 };
 
-const closeReceiptPreview = () => {
-  state.receiptPreview = null;
-};
+const paymentForUser = () => state.payments.find((item) => item.userId === state.user?.uid && item.status === "pending");
 
-const getFirebaseErrorMessage = (error, fallback) => {
-  const code = error?.code ? ` (${error.code})` : "";
-  const message = error?.message || fallback;
-  return `${message}${code}`;
-};
+const canSeeQuizzes = () => state.userProfile?.selectedPlan === "plus" || state.userProfile?.role === "admin";
 
-const normalizePendingPayments = (value) => {
-  if (!value) return [];
-  if (Array.isArray(value)) return value.filter(Boolean);
-  return Object.values(value).filter(Boolean);
-};
+const handleAuth = async (event) => {
+  event.preventDefault();
+  if (!auth) return;
 
-const writeCurriculumToCloud = async (nextLibrary) => {
-  if (!curriculumRef) {
-    state.curriculumError = "Firebase კავშირი ვერ დამყარდა.";
-    throw new Error("Firebase database is not available.");
-  }
-  await curriculumRef.set(nextLibrary);
-};
+  const form = new FormData(event.currentTarget);
+  const fullName = form.get("fullName")?.toString().trim() || "";
+  const email = form.get("email")?.toString().trim() || "";
+  const password = form.get("password")?.toString().trim() || "";
 
-const getAuthorRef = (authorId) => (curriculumRef && authorId ? curriculumRef.child(`authors/${authorId}`) : null);
-const getWorkRef = (authorId, workId) =>
-  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}`) : null;
-const getChaptersRef = (authorId, workId) =>
-  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}/chapters`) : null;
-const getCharactersRef = (authorId, workId) =>
-  curriculumRef && authorId && workId ? curriculumRef.child(`authors/${authorId}/works/${workId}/characters`) : null;
-
-const openAuthorsDirectory = () => {
-  state.currentView = "authors-main";
-  state.selectedAuthorId = null;
-  state.selectedWorkId = null;
-  render();
-};
-
-const openAuthorDetail = (authorId) => {
-  if (!authorId) return;
-  state.currentView = "author-detail";
-  state.selectedAuthorId = authorId;
-  state.selectedWorkId = null;
-  render();
-};
-
-const openWorkEditor = (authorId, workId) => {
-  if (!authorId || !workId) return;
-  state.currentView = "work-editor";
-  state.selectedAuthorId = authorId;
-  state.selectedWorkId = workId;
-  render();
-};
-
-const subscribeToCurriculum = () => {
-  if (!curriculumRef) {
-    state.curriculumLoading = false;
-    state.curriculumError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
-    render();
-    return;
-  }
-
-  curriculumRef.on(
-    "value",
-    (snapshot) => {
-      const remoteValue = snapshot.val();
-      if (!remoteValue) {
-        state.library = getDefaultAuthorsMap();
-        state.curriculumError = "";
-      } else {
-        const normalizedAuthors = normalizeAuthorsMap(remoteValue);
-        if (hasRenderableAuthors(normalizedAuthors)) {
-          state.library = normalizedAuthors;
-          state.curriculumError = "";
-        } else {
-          state.library = getDefaultAuthorsMap();
-          state.curriculumError = "Firebase მონაცემების სტრუქტურა არასწორია. ჩაიტვირთა სარეზერვო ბიბლიოთეკა.";
-          console.warn("Unexpected Firebase curriculum payload:", remoteValue);
-        }
-      }
-      state.curriculumLoading = false;
-      render();
-    },
-    (error) => {
-      state.curriculumLoading = false;
-      state.curriculumError = getFirebaseErrorMessage(
-        error,
-        "ბიბლიოთეკის სინქრონიზაცია ვერ მოხერხდა."
-      );
-      render();
-    }
-  );
-};
-
-const subscribeToPendingPayments = () => {
-  if (!pendingPaymentsRootRef) {
-    state.paymentsError = "Firebase ინიციალიზაცია ვერ შესრულდა.";
-    render();
-    return;
-  }
-
-  pendingPaymentsRootRef.on(
-    "value",
-    (snapshot) => {
-      state.pendingPayments = normalizePendingPayments(snapshot.val());
-      state.paymentsError = "";
-      render();
-    },
-    (error) => {
-      state.pendingPayments = [];
-      state.paymentsError = getFirebaseErrorMessage(
-        error,
-        "გადახდების სინქრონიზაცია ვერ მოხერხდა."
-      );
-      render();
-    }
-  );
-};
-
-const isPremium = () => state.currentUser && (state.currentUser.status === "premium" || state.currentUser.role === "admin");
-const isPending = () => state.currentUser && state.currentUser.status === "pending";
-const isAdmin = () => state.currentUser && state.currentUser.role === "admin";
-
-const PLAN_DURATIONS = {
-  "5": 30,
-  "10": 30,
-};
-
-const planCatalog = {
-  "5": {
-    name: "5 ლარი",
-    price: "5 ლარი / თვე",
-    summary: "სრული სასწავლო ბიბლიოთეკა ერთ სივრცეში.",
-    durationDays: PLAN_DURATIONS["5"],
-    features: [
-      "ნაწარმოებების შინაარსები",
-      "ავტორების ბიოგრაფიები",
-      "პერსონაჟების ანალიზი",
-      "სტრუქტურა და ისტორიული კონტექსტი",
-    ],
-  },
-  "10": {
-    name: "10 ლარი",
-    price: "10 ლარი / თვე",
-    summary: "ყველაფერი, რაც 5-ლარიან გეგმაშია, დამატებითი პრაქტიკით.",
-    durationDays: PLAN_DURATIONS["10"],
-    features: [
-      "ნაწარმოებების შინაარსები",
-      "ავტორების ბიოგრაფიები",
-      "პერსონაჟების ანალიზი",
-      "სტრუქტურა და ისტორიული კონტექსტი",
-      "ქვიზები",
-      "ტესტირება",
-    ],
-  },
-};
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-const formatDate = (value) => {
-  if (!value) return "არ არის";
-  return new Date(value).toLocaleDateString("ka-GE");
-};
-
-const getDaysLeft = (value) => {
-  if (!value) return 0;
-  return Math.max(0, Math.ceil((value - Date.now()) / DAY_MS));
-};
-
-const getPlanName = (planId) => planCatalog[planId]?.name || "გეგმა";
-
-const refreshSubscriptionStatuses = () => {
-  let changed = false;
-  state.users = state.users.map((user) => {
-    if (!user.subscriptionExpiresAt) return user;
-    if (user.role === "admin") return user;
-    if (user.subscriptionExpiresAt <= Date.now() && user.status === "premium") {
-      changed = true;
-      return {
-        ...user,
-        status: "free",
-        subscriptionPlan: null,
-        subscriptionApprovedAt: null,
+  try {
+    if (state.authMode === "signup") {
+      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      await setDoc(doc(db, "users", credential.user.uid), {
+        uid: credential.user.uid,
+        email,
+        fullName,
+        role: roleOf(email),
+        status: roleOf(email) === "admin" ? "active" : "inactive",
+        selectedPlan: null,
+        subscriptionStartedAt: null,
         subscriptionExpiresAt: null,
-      };
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await signInWithEmailAndPassword(auth, email, password);
     }
-    return user;
-  });
-  if (changed) persistUsers();
-};
-
-const updateCurrentUserStatus = (status) => {
-  if (!state.currentUser) return;
-  state.users = state.users.map((user) =>
-    user.email === state.currentUser.email ? { ...user, status } : user
-  );
-  persistUsers();
-  syncUserProfileToCloud({ ...state.currentUser, status }).catch(() => {});
-};
-
-const setRoute = (route) => {
-  state.route = route;
-  render();
-};
-
-const signOut = () => {
-  unsubscribeCurrentUserNode();
-  state.currentUser = null;
-  state.route = "landing";
-  state.dashboardTab = "library";
-  state.selectedAuthorId = null;
-  state.selectedWorkId = null;
-  closeAdminModalState();
-  closeReceiptPreview();
-  localStorage.removeItem(STORAGE_KEYS.currentUser);
-  render();
-};
-
-const handleSignup = async (formData) => {
-  const firstName = formData.get("firstName").trim();
-  const lastName = formData.get("lastName").trim();
-  const email = formData.get("email").trim().toLowerCase();
-  const password = formData.get("password").trim();
-
-  if (!firstName || !lastName || !email || !password) {
-    alert("გთხოვთ შეავსოთ ყველა ველი.");
-    return;
-  }
-
-  if (state.users.some((user) => user.email === email)) {
-    alert("ამ ელ-ფოსტით მომხმარებელი უკვე არსებობს.");
-    return;
-  }
-
-  const newUser = attachRole({
-    id: Date.now(),
-    firstName,
-    lastName,
-    email,
-    password,
-    status: defaultUserStatus,
-    subscriptionPlan: null,
-    subscriptionApprovedAt: null,
-    subscriptionExpiresAt: null,
-  });
-
-  state.users.push(newUser);
-  persistUsers();
-  state.currentUser = newUser;
-  setData(STORAGE_KEYS.currentUser, newUser);
-  try {
-    await syncUserProfileToCloud(newUser);
-    subscribeCurrentUserNode(newUser.id);
   } catch (error) {
-    alert(getFirebaseErrorMessage(error, "მომხმარებლის სინქრონიზაცია ვერ მოხერხდა."));
+    alert(error.message);
   }
-  state.route = "dashboard";
-  state.paymentOpen = Boolean(state.selectedPlan);
-  render();
 };
 
-const handleLogin = async (formData) => {
-  const email = formData.get("email").trim().toLowerCase();
-  const password = formData.get("password").trim();
-  const user = state.users.find((item) => item.email === email && item.password === password);
-
-  if (!user) {
-    alert("ელ-ფოსტა ან პაროლი არასწორია.");
-    return;
-  }
-
-  const sessionUser = attachRole(user, true);
-  state.currentUser = sessionUser;
-  setData(STORAGE_KEYS.currentUser, sessionUser);
-  try {
-    await syncUserProfileToCloud(sessionUser);
-    subscribeCurrentUserNode(sessionUser.id);
-  } catch (error) {
-    alert(getFirebaseErrorMessage(error, "მომხმარებლის სინქრონიზაცია ვერ მოხერხდა."));
-  }
-  state.route = "dashboard";
-  state.paymentOpen = Boolean(state.selectedPlan);
-  render();
-};
-
-const openWork = (authorId, workId) => {
-  state.selectedAuthorId = authorId;
-  state.selectedWorkId = workId;
-  state.dashboardTab = "library";
-  state.paywallOpen = !isPremium();
-  render();
-};
-
-const submitPayment = async (event) => {
+const handlePaymentUpload = async (event) => {
   event.preventDefault();
-  if (!state.currentUser) return;
+  if (!state.user || !storage) return;
 
-  const form = event.currentTarget;
-  const screenshot = form.dataset.base64;
-  const senderName = form.senderName.value.trim();
+  const form = new FormData(event.currentTarget);
+  const planId = form.get("plan");
+  const file = form.get("receipt");
+  const packageInfo = packageCatalog.find((item) => item.id === planId);
 
-  if (!screenshot) {
-    alert("გთხოვთ ატვირთოთ ქვითრის ფოტო.");
-    return;
-  }
-
-  const packet = {
-    id: Date.now(),
-    studentName: `${state.currentUser.firstName} ${state.currentUser.lastName}`,
-    studentEmail: state.currentUser.email,
-    receiptImage: screenshot,
-    userId: state.currentUser.id,
-    email: state.currentUser.email,
-    firstName: state.currentUser.firstName,
-    lastName: state.currentUser.lastName,
-    senderName,
-    screenshot,
-    planId: state.selectedPlan || "5",
-    approvedAt: null,
-    expiresAt: null,
-    status: "pending",
-  };
-
-  const paymentRef = getPendingPaymentRef(state.currentUser.id);
-  if (!paymentRef) {
-    alert("ქვითრის გაგზავნა ვერ მოხერხდა.");
+  if (!(file instanceof File) || file.size === 0) {
+    alert("ატვირთე გადახდის სქრინშოტი.");
     return;
   }
 
   try {
-    await paymentRef.set(packet);
-    state.paymentsError = "";
-    updateCurrentUserStatus("pending");
-    alert("ქვითარი წარმატებით გაიგზავნა.");
-    state.paymentOpen = false;
-    state.selectedPlan = null;
-    state.paywallOpen = true;
-    render();
-  } catch (error) {
-    state.paymentsError = getFirebaseErrorMessage(error, "ქვითრის გაგზავნა ვერ მოხერხდა.");
-    alert(getFirebaseErrorMessage(error, "ქვითრის გაგზავნა ვერ მოხერხდა."));
-  }
-};
+    const storageRef = ref(storage, `receipts/${state.user.uid}/${Date.now()}-${file.name}`);
+    await uploadBytes(storageRef, file);
+    const receiptUrl = await getDownloadURL(storageRef);
 
-const handleFileChange = (input, form) => {
-  const file = input.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    form.dataset.base64 = String(reader.result);
-    const nameNode = form.querySelector(".file-chip");
-    if (nameNode) nameNode.textContent = file.name;
-  };
-  reader.readAsDataURL(file);
-};
+    const pendingExisting = paymentForUser();
+    if (pendingExisting) {
+      alert("შენი გადახდა უკვე გადამოწმების პროცესშია.");
+      return;
+    }
 
-const approvePayment = async (paymentId, nextStatus) => {
-  const request = state.pendingPayments.find((item) => Number(item.id) === paymentId);
-  if (!request) return;
-
-  const planDuration = planCatalog[request.planId]?.durationDays || 30;
-  const approvedAt = Date.now();
-  const expiresAt = approvedAt + planDuration * DAY_MS;
-
-  const userRef = getUserRef(request.userId);
-  const paymentRef = getPendingPaymentRef(request.userId);
-  if (!userRef || !paymentRef) return;
-
-  try {
-    await userRef.update(
-      nextStatus === "premium"
-        ? {
-            status: "premium",
-            approvedAt,
-            subscriptionPlan: request.planId,
-            subscriptionApprovedAt: approvedAt,
-            subscriptionExpiresAt: expiresAt,
-          }
-        : {
-            status: "free",
-            approvedAt: null,
-            subscriptionPlan: null,
-            subscriptionApprovedAt: null,
-            subscriptionExpiresAt: null,
-          }
-    );
-    await paymentRef.remove();
-    state.paymentsError = "";
-    closeReceiptPreview();
-    alert(
-      nextStatus === "premium"
-        ? "მომხმარებელი წარმატებით გააქტიურდა."
-        : "ქვითარი უარყოფილია და სტატუსი განულდა."
-    );
-    render();
-  } catch (error) {
-    state.paymentsError = getFirebaseErrorMessage(error, "გადახდის განახლება ვერ მოხერხდა.");
-    alert(getFirebaseErrorMessage(error, "გადახდის განახლება ვერ მოხერხდა."));
-  }
-};
-
-const previewReceipt = (paymentId) => {
-  const request = state.pendingPayments.find((item) => item.id === paymentId);
-  if (!request) return;
-  state.receiptPreview = request;
-  render();
-};
-
-const addNewChapter = async (event) => {
-  event.preventDefault();
-  const authorId = state.selectedAuthorId;
-  const workId = state.selectedWorkId;
-  const title = event.currentTarget.chapterTitle.value.trim();
-  const content = event.currentTarget.chapterContent.value.trim();
-  if (!authorId || !workId || !title || !content) return;
-
-  const chapterId = `${slugify(title) || "chapter"}-${Date.now()}`;
-  try {
-    await getChaptersRef(authorId, workId).child(chapterId).set({ title, content });
-    event.currentTarget.reset();
-    alert("ახალი თავი დამატებულია.");
-  } catch (error) {
-    alert(getFirebaseErrorMessage(error, "თავის დამატება ვერ მოხერხდა."));
-  }
-};
-
-const addNewCharacter = async (event) => {
-  event.preventDefault();
-  const authorId = state.selectedAuthorId;
-  const workId = state.selectedWorkId;
-  const name = event.currentTarget.characterName.value.trim();
-  const description = event.currentTarget.characterDescription.value.trim();
-  if (!authorId || !workId || !name || !description) return;
-
-  const characterId = `${slugify(name) || "character"}-${Date.now()}`;
-  try {
-    await getCharactersRef(authorId, workId).child(characterId).set({ name, description });
-    event.currentTarget.reset();
-    alert("პერსონაჟი დამატებულია.");
-  } catch (error) {
-    alert(getFirebaseErrorMessage(error, "პერსონაჟის დამატება ვერ მოხერხდა."));
-  }
-};
-
-const saveAuthor = async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const name = form.name.value.trim();
-  const era = form.era.value.trim();
-  const bio = form.bio.value.trim();
-  const image = form.dataset.base64 || form.portraitUrl.value.trim();
-  const authorId = state.editAuthorId || `${slugify(name) || "author"}-${Date.now()}`;
-
-  if (!name || !era || !bio) {
-    alert("გთხოვთ შეავსოთ ავტორის სახელი, ეპოქა და ბიოგრაფია.");
-    return;
-  }
-
-  try {
-    const existingWorks = state.library?.[authorId]?.works || {};
-    await getAuthorRef(authorId).set({
-      name,
-      bio,
-      image,
-      era,
-      works: existingWorks,
+    await addDoc(collection(db, "payments"), {
+      userId: state.user.uid,
+      userEmail: state.user.email,
+      userName: state.userProfile?.fullName || "",
+      planId,
+      planName: packageInfo?.name || "",
+      price: packageInfo?.price || null,
+      receiptUrl,
+      status: "pending",
+      createdAt: serverTimestamp(),
     });
-    closeAdminModalState();
-    openAuthorDetail(authorId);
-    alert("ავტორი წარმატებით შენახულია.");
-  } catch (error) {
-    alert(getFirebaseErrorMessage(error, "ავტორის შენახვა Firebase-ში ვერ მოხერხდა."));
-  }
-};
 
-const saveWork = async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const authorId = state.editAuthorId;
-  if (!authorId) return;
-
-  const title = form.title.value.trim();
-  if (!title) {
-    alert("გთხოვთ შეავსოთ ნაწარმოების სათაური.");
-    return;
-  }
-
-  const workId = state.editWorkId || `${slugify(title) || "work"}-${Date.now()}`;
-  try {
-    const existingWork = state.library?.[authorId]?.works?.[workId] || {};
-    await getWorkRef(authorId, workId).set({
-      title,
-      chapters: existingWork.chapters || {},
-      characters: existingWork.characters || {},
-      structure: existingWork.structure || "",
-      questions: existingWork.questions || "",
+    await updateDoc(doc(db, "users", state.user.uid), {
+      status: "pending",
+      selectedPlan: planId,
+      updatedAt: serverTimestamp(),
     });
-    closeAdminModalState();
-    openWorkEditor(authorId, workId);
-    alert("ნაწარმოები შენახულია.");
   } catch (error) {
-    alert(getFirebaseErrorMessage(error, "ნაწარმოების შენახვა Firebase-ში ვერ მოხერხდა."));
+    alert(error.message);
   }
 };
 
-const openAdminEditor = (mode, authorId = null, workId = null) => {
-  state.adminModalMode = mode;
-  state.editAuthorId = authorId;
-  state.editWorkId = workId;
-  state.adminModalOpen = true;
-  render();
+const approvePayment = async (payment) => {
+  const now = Date.now();
+  const expiresAt = new Date(now + SUBSCRIPTION_DAYS * 86400000);
+  await updateDoc(doc(db, "users", payment.userId), {
+    status: "active",
+    selectedPlan: payment.planId,
+    subscriptionStartedAt: new Date(now).toISOString(),
+    subscriptionExpiresAt: expiresAt.toISOString(),
+    updatedAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, "payments", payment.id), { status: "approved", reviewedAt: serverTimestamp() });
 };
 
-const navigationMarkup = () => {
-  if (!state.currentUser) return "";
-  const tabs = [
-    { id: "library", label: "ბიბლიოთეკა" },
-    { id: "profile", label: "პროფილი" },
-  ];
-
-  if (isAdmin()) tabs.push({ id: "payments", label: "🔔 გადახდების მართვა" });
-
-  return `
-    <header class="topbar">
-      <div class="brand-lockup">
-        <div class="brand-badge">კ</div>
-        <div>
-          <h1>კალამი</h1>
-          <p>აბიტურიენტთა ეროვნული ბიბლიოთეკა 2026</p>
-        </div>
-      </div>
-      <nav class="nav-tabs">
-        ${tabs
-          .map(
-            (tab) => `
-              <button class="nav-tab ${state.dashboardTab === tab.id ? "active" : ""}" data-tab="${tab.id}">
-                ${tab.label}
-              </button>
-            `
-          )
-          .join("")}
-      </nav>
-      <div class="topbar-actions">
-        <div class="status-pill ${state.currentUser.status}">
-          ${
-            isAdmin()
-              ? "ადმინისტრატორი"
-              : state.currentUser.status === "premium"
-              ? "Premium"
-              : state.currentUser.status === "pending"
-              ? "განხილვაში"
-              : "Free"
-          }
-        </div>
-        <button class="icon-button" id="logoutBtn" aria-label="გასვლა">⎋</button>
-      </div>
-    </header>
-  `;
+const rejectPayment = async (payment) => {
+  await updateDoc(doc(db, "users", payment.userId), {
+    status: "inactive",
+    selectedPlan: null,
+    updatedAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, "payments", payment.id), { status: "rejected", reviewedAt: serverTimestamp() });
 };
 
-const landingMarkup = () => `
-  <section class="landing-shell">
-    <div class="hero-panel">
-      <div class="hero-copy">
-        <span class="eyebrow">Kalami.ge • 2026 ეროვნული გამოცდები</span>
-        <h1>ყველაფერი ქართული ლიტერატურის სრულყოფილად გასაგებად, ერთ სივრცეში.</h1>
-        <p>
-          კალამი აერთიანებს ქართულ ლიტერატურას ერთ მოწესრიგებულ სივრცეში: სიუჟეტური შეჯამებები,
-          პერსონაჟთა ანალიზი, სტრუქტურული რუკები და ისტორიული კონტექსტი მხოლოდ 5 ლარად თვეში.
-        </p>
-      </div>
-      <div class="hero-stats hero-stats-vertical">
-        <article><strong>40+</strong><span>ავტორი და ტექსტი</span></article>
-        <article><strong>100%</strong><span>სანდო და მოწესრიგებული</span></article>
-        <article><strong>5 GEL</strong><span>სრული წვდომა / თვე</span></article>
-      </div>
-    </div>
-    <div class="gateway-grid">
-      <section class="auth-card">
-        <div class="switch-row">
-          <button class="switch-btn ${state.authMode === "signup" ? "active" : ""}" data-auth="signup">რეგისტრაცია</button>
-          <button class="switch-btn ${state.authMode === "login" ? "active" : ""}" data-auth="login">შესვლა</button>
-        </div>
-        ${
-          state.authMode === "signup"
-            ? `
-            <form id="signupForm" class="stack-form">
-              <label><span>სახელი</span><input name="firstName" type="text" required /></label>
-              <label><span>გვარი</span><input name="lastName" type="text" required /></label>
-              <label><span>ელ-ფოსტა</span><input name="email" type="email" required /></label>
-              <label><span>პაროლი</span><input name="password" type="password" required /></label>
-              <button type="submit" class="primary-btn">ანგარიშის შექმნა</button>
-            </form>
-          `
-            : `
-            <form id="loginForm" class="stack-form">
-              <label><span>ელ-ფოსტა</span><input name="email" type="email" required /></label>
-              <label><span>პაროლი</span><input name="password" type="password" required /></label>
-              <button type="submit" class="primary-btn">შესვლა</button>
-            </form>
-          `
-        }
-      </section>
-    </div>
-    <section class="pricing-grid pricing-grid-landing">
-      <article class="pricing-card pricing-tier">
-        <h3>უფასო</h3>
-        <p>დაათვალიერე ბიბლიოთეკა, ავტორები და თემატური კატეგორიები საწყისი ორიენტაციისთვის.</p>
-        <div class="mini-price">0 ლარი</div>
-      </article>
-      <article class="pricing-card pricing-tier premium">
-        <div class="plan-badge subtle">ყველაზე მოთხოვნადი</div>
-        <h3>5 ლარი / თვე</h3>
-        <p>სრული წვდომა ლიტერატურის ძირითად მასალებზე.</p>
-        <button class="primary-btn" data-open-plan="5">გამოწერა</button>
-      </article>
-      <article class="pricing-card pricing-tier premium">
-        <div class="plan-badge subtle">მაქსიმალური პაკეტი</div>
-        <h3>10 ლარი / თვე</h3>
-        <p>სრული წვდომა დამატებით ქვიზებითა და ტესტირებით.</p>
-        <button class="primary-btn" data-open-plan="10">გამოწერა</button>
-      </article>
-    </section>
-  </section>
-`;
-
-const getAuthorsArray = () =>
-  Object.entries(state.library || {}).map(([id, author]) => ({
-    ...author,
+const handleAuthorCreate = async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const id = form.get("id").toString().trim();
+  await setDoc(doc(db, "authors", id), {
     id,
-    works: author.works || {},
-  }));
+    name: form.get("name").toString().trim(),
+    era: form.get("era").toString().trim(),
+    bio: form.get("bio").toString().trim(),
+    updatedAt: serverTimestamp(),
+    createdAt: serverTimestamp(),
+  });
+  event.currentTarget.reset();
+};
 
-const renderAuthorsMainDirectory = () => {
-  const authors = getAuthorsArray();
-  return `
-    <section class="library-shell cms-shell">
-      <div class="library-header">
-        <div>
-          <span class="eyebrow">ადმინ პანელი</span>
-          <h2>ავტორების დირექტორია</h2>
-        </div>
-        <button class="add-btn" id="openNewAuthorModal" aria-label="ახალი ავტორი">+</button>
+const handleWorkCreate = async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const authorId = form.get("authorId").toString().trim();
+  const workId = form.get("workId").toString().trim();
+  const quizzesRaw = form.get("quizzes").toString().trim();
+  let quizzes = [];
+
+  if (quizzesRaw) {
+    try {
+      quizzes = JSON.parse(quizzesRaw);
+    } catch {
+      alert("ქვიზების ველი უნდა იყოს სწორი JSON.");
+      return;
+    }
+  }
+
+  await setDoc(doc(db, "authors", authorId, "works", workId), {
+    id: workId,
+    authorId,
+    title: form.get("title").toString().trim(),
+    tabs: {
+      summary: { label: "შინაარსი", content: form.get("summary").toString().trim() },
+      biography: { label: "განხილვა", content: form.get("analysis").toString().trim() },
+      characters: { label: "დახასიათება", content: form.get("characters").toString().trim() },
+      plan: { label: "გეგმა", content: form.get("plan").toString().trim() },
+      quotes: { label: "ციტატები", content: form.get("quotes").toString().trim() },
+    },
+    quizzes,
+    updatedAt: serverTimestamp(),
+    createdAt: serverTimestamp(),
+  });
+  event.currentTarget.reset();
+};
+
+const renderLanding = () => `
+  <div class="hero">
+    <section class="panel">
+      <span class="pill">Premium Educational Platform</span>
+      <h1 class="headline">მითოსი — მათთვის, ვინც ქართულს უმაღლეს ქულაზე ჩააბარებს.</h1>
+      <p class="lead">
+        ქართული ლიტერატურის პრემიუმ ბიბლიოთეკა აბიტურიენტებისთვის: სტრუქტურირებული კონტენტი,
+        ესესთვის გამზადებული არგუმენტები, ციტატები, თემატური განხილვები და ქვიზები ერთ სივრცეში.
+      </p>
+      <div class="actions">
+        <button class="btn gold" data-action="go-auth">დაწყება</button>
+        <button class="btn secondary" data-action="theme-toggle">მუქი რეჟიმი</button>
       </div>
-      ${
-        state.curriculumLoading
-          ? `<div class="sync-banner">ბიბლიოთეკა იტვირთება Firebase-დან...</div>`
-          : ""
-      }
-      ${
-        state.curriculumError
-          ? `<div class="sync-banner error">${state.curriculumError}</div>`
-          : ""
-      }
-      <div class="author-grid cms-author-grid">
-        ${
-          authors.length
-            ? authors
-                .map(
-                  (author) => `
-                    <article class="author-card cms-clickable-card" data-open-author="${author.id}">
-                      <div class="author-top">
-                        <div class="avatar-wrap">
-                          ${
-                            author.image
-                              ? `<img src="${author.image}" alt="${author.name || "ავტორი"}" class="avatar-img" />`
-                              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
-                          }
-                        </div>
-                        <div>
-                          <h4>${author.name || "ავტორი"}</h4>
-                          <p>${author.era || "ავტორი"}</p>
-                        </div>
-                      </div>
-                      <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
-                    </article>
-                  `
-                )
-                .join("")
-            : `<div class="empty-payments">ავტორები ჯერ არ არის დამატებული.</div>`
-        }
+      <div class="stats">
+        <article class="stat"><strong>${seedAuthors.length}+</strong><span class="muted">ავტორი seed-ბაზაში</span></article>
+        <article class="stat"><strong>Realtime</strong><span class="muted">Firestore onSnapshot სინქრონიზაცია</span></article>
+        <article class="stat"><strong>30 დღე</strong><span class="muted">აქტიური აბონენტის წვდომა</span></article>
       </div>
     </section>
-  `;
-};
-
-const renderAuthorDetailPage = () => {
-  const author = getSelectedAuthor();
-  if (state.curriculumLoading) {
-    return `<section class="library-shell"><div class="sync-banner">ინფორმაცია იტვირთება...</div></section>`;
-  }
-  if (!author) {
-    return `
-      <section class="library-shell">
-        <div class="cms-header-row">
-          <button class="secondary-btn" data-back-authors>უკან</button>
-        </div>
-        <div class="empty-payments">ინფორმაცია იტვირთება...</div>
-      </section>
-    `;
-  }
-
-  const works = Object.entries(author.works || {}).map(([id, work]) => ({ id, ...work }));
-  return `
-    <section class="library-shell cms-shell">
-      <div class="cms-header-row">
-        <button class="secondary-btn" data-back-authors>უკან</button>
-        <button class="accent-btn" data-add-work="${state.selectedAuthorId}">ახალი ნაწარმოების დამატება</button>
+    <aside class="panel">
+      <span class="pill subtle">ბრენდი</span>
+      <h2>Minimal Library Aesthetic</h2>
+      <p class="lead">
+        ლოგო აგებულია ელეგანტურ ტექსტზე, სადაც „ო“ გადაკეთებულია წიგნის/მელნის ნიშნად.
+        ინტერფეისი თბილია, მსუბუქი და პრემიუმ, ხოლო Dark Mode ინარჩუნებს იმავე სიმშვიდეს.
+      </p>
+      <div class="card">
+        <p class="meta">პაკეტი 1</p>
+        <div class="price">5₾</div>
+        <p class="meta">შინაარსი, ბიოგრაფია, დახასიათება, გეგმა, განხილვა</p>
       </div>
-      <article class="cms-author-profile">
-        <div class="avatar-wrap large">
-          ${
-            author.image
-              ? `<img src="${author.image}" alt="${author.name}" class="avatar-img" />`
-              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
-          }
-        </div>
-        <div>
-          <h2>${author.name}</h2>
-          <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
-        </div>
-      </article>
-      <section class="cms-works-section">
-        <h3>ნაწარმოებები</h3>
-        <div class="cms-work-grid">
-          ${
-            works.length
-              ? works
-                  .map(
-                    (work) => `
-                      <button class="work-chip" data-open-work="${state.selectedAuthorId}|${work.id}">
-                        ${work.title || "უსათაურო ნაწარმოები"}
-                      </button>
-                    `
-                  )
-                  .join("")
-              : `<div class="empty-payments">ამ ავტორს ჯერ ნაწარმოებები არ აქვს.</div>`
-          }
-        </div>
-      </section>
-    </section>
-  `;
-};
-
-const renderWorkEditorPage = () => {
-  const author = getSelectedAuthor();
-  const work = getSelectedWork();
-  if (state.curriculumLoading) {
-    return `<section class="library-shell"><div class="sync-banner">ინფორმაცია იტვირთება...</div></section>`;
-  }
-  if (!author || !work) {
-    return `
-      <section class="library-shell">
-        <div class="cms-header-row">
-          <button class="secondary-btn" data-back-author>უკან</button>
-        </div>
-        <div class="empty-payments">ინფორმაცია იტვირთება...</div>
-      </section>
-    `;
-  }
-
-  const chapters = Object.entries(work.chapters || {}).map(([id, chapter]) => ({ id, ...chapter }));
-  const characters = Object.entries(work.characters || {}).map(([id, character]) => ({ id, ...character }));
-
-  return `
-    <section class="library-shell cms-shell">
-      <div class="cms-header-row">
-        <button class="secondary-btn" data-back-author>უკან</button>
+      <div class="card" style="margin-top:12px;">
+        <p class="meta">პაკეტი 2</p>
+        <div class="price">10₾</div>
+        <p class="meta">ყველაფერი + ქვიზები და ტესტები</p>
       </div>
-      <div class="cms-work-header">
-        <span class="section-tag">${author.name}</span>
-        <h2>${work.title}</h2>
-      </div>
-      <div class="cms-editor-grid">
-        <section class="cms-editor-section">
-          <h3>შინაარსი და თავები</h3>
-          <div class="cms-list-block">
-            ${
-              chapters.length
-                ? chapters
-                    .map(
-                      (chapter) => `
-                        <article class="cms-item-card">
-                          <h4>${chapter.title}</h4>
-                          <p>${chapter.content}</p>
-                        </article>
-                      `
-                    )
-                    .join("")
-                : `<div class="empty-payments">თავები ჯერ არ არის დამატებული.</div>`
-            }
-          </div>
-          <form id="chapterForm" class="stack-form">
-            <label>
-              <span>თავის სათაური</span>
-              <input name="chapterTitle" type="text" required />
-            </label>
-            <label>
-              <span>ტექსტი</span>
-              <textarea name="chapterContent" rows="6" required></textarea>
-            </label>
-            <button type="submit" class="primary-btn">ახალი თავის დამატება</button>
-          </form>
-        </section>
-        <section class="cms-editor-section">
-          <h3>პერსონაჟთა დახასიათება</h3>
-          <div class="cms-list-block">
-            ${
-              characters.length
-                ? characters
-                    .map(
-                      (character) => `
-                        <article class="cms-item-card">
-                          <h4>${character.name}</h4>
-                          <p>${character.description}</p>
-                        </article>
-                      `
-                    )
-                    .join("")
-                : `<div class="empty-payments">პერსონაჟები ჯერ არ არის დამატებული.</div>`
-            }
-          </div>
-          <form id="characterForm" class="stack-form">
-            <label>
-              <span>პერსონაჟის სახელი</span>
-              <input name="characterName" type="text" required />
-            </label>
-            <label>
-              <span>დახასიათება</span>
-              <textarea name="characterDescription" rows="6" required></textarea>
-            </label>
-            <button type="submit" class="primary-btn">პერსონაჟის დამატება</button>
-          </form>
-        </section>
-      </div>
-    </section>
-  `;
-};
-
-const renderStudentLibrary = () => {
-  const authors = getAuthorsArray();
-  return `
-    <section class="library-shell">
-      <div class="library-header">
-        <div>
-          <span class="eyebrow">ბიბლიოთეკა</span>
-          <h2>ავტორები და ნაწარმოებები</h2>
-        </div>
-      </div>
-      <div class="author-grid">
-        ${
-          authors.length
-            ? authors
-                .map(
-                  (author) => `
-                    <article class="author-card">
-                      <div class="author-top">
-                        <div class="avatar-wrap">
-                          ${
-                            author.image
-                              ? `<img src="${author.image}" alt="${author.name || "ავტორი"}" class="avatar-img" />`
-                              : `<div class="avatar-fallback">${author.name?.charAt(0) || "ა"}</div>`
-                          }
-                        </div>
-                        <div>
-                          <h4>${author.name || "ავტორი"}</h4>
-                          <p>${author.era || "ავტორი"}</p>
-                        </div>
-                      </div>
-                      <p>${author.bio || "ბიოგრაფია ჯერ არ არის დამატებული."}</p>
-                      <div class="work-list">
-                        ${Object.entries(author.works || {})
-                          .map(
-                            ([workId, work]) => `
-                              <button class="work-chip" data-open-student-work="${author.id}|${workId}">
-                                ${work.title || "უსათაურო ნაწარმოები"}
-                              </button>
-                            `
-                          )
-                          .join("")}
-                      </div>
-                    </article>
-                  `
-                )
-                .join("")
-            : `<div class="empty-payments">ბიბლიოთეკა ცარიელია.</div>`
-        }
-      </div>
-    </section>
-  `;
-};
-
-const libraryMarkup = () => {
-  if (!isAdmin()) return renderStudentLibrary();
-  if (state.currentView === "author-detail") return renderAuthorDetailPage();
-  if (state.currentView === "work-editor") return renderWorkEditorPage();
-  return renderAuthorsMainDirectory();
-};
-
-const profileMarkup = () => `
-  <section class="profile-shell">
-    <article class="profile-card wide">
-      <span class="section-tag">ჩემი პროფილი</span>
-      <h2>${state.currentUser.firstName} ${state.currentUser.lastName}</h2>
-      <p>${state.currentUser.email}</p>
-      <div class="profile-meta">
-        <div><strong>სტატუსი</strong><span>${state.currentUser.status}</span></div>
-        <div><strong>წვდომა</strong><span>${isPremium() ? "სრული" : "შეზღუდული"}</span></div>
-        <div><strong>გეგმა</strong><span>${state.currentUser.subscriptionPlan ? getPlanName(state.currentUser.subscriptionPlan) : "არ არის აქტიური"}</span></div>
-        <div><strong>დარჩენილი დღეები</strong><span>${state.currentUser.subscriptionExpiresAt ? `${getDaysLeft(state.currentUser.subscriptionExpiresAt)} დღე` : "-"}</span></div>
-      </div>
-      <button class="accent-btn" id="openPaymentFromProfile">💳 ქვითრის ატვირთვა</button>
-      ${
-        isPending()
-          ? `<div class="pending-note">თქვენი ქვითარი განხილვის პროცესშია.</div>`
-          : ""
-      }
-    </article>
-    <article class="profile-card">
-      <span class="section-tag">აქტივაცია</span>
-      <h3>Bank of Georgia</h3>
-      <p>პლატფორმის სრული წვდომისთვის გთხოვთ გადარიცხოთ 5 ლარი მითითებულ ანგარიშზე.</p>
-      <strong>საქართველოს ბანკი (BOG): GE928G0000000612371503</strong>
-    </article>
-  </section>
-`;
-
-const paymentsMarkup = () => `
-  <section class="payments-shell">
-    ${(() => {
-      const pendingRequests = state.pendingPayments.filter((payment) => payment.status === "pending");
-      return `
-    <div class="library-header">
-      <div>
-        <span class="eyebrow">ადმინისტრაცია</span>
-        <h2>გადახდების მართვა</h2>
-      </div>
-      <div class="status-pill pending">${pendingRequests.length} მოთხოვნა</div>
-    </div>
-    <div class="payments-section">
-      <h3>მოსული გადახდების გადამოწმება</h3>
-      ${
-        state.paymentsError
-          ? `<div class="sync-banner error">${state.paymentsError}</div>`
-          : ""
-      }
-      <div class="payments-table-wrap">
-      ${
-        pendingRequests.length
-          ? pendingRequests
-              .map((payment) => `
-                <article class="payment-row">
-                  <div>
-                    <strong>${payment.studentName || `${payment.firstName} ${payment.lastName}`}</strong>
-                    <p>${payment.senderName || payment.studentName || "-"}</p>
-                  </div>
-                  <div>
-                    <strong>${payment.studentEmail || payment.email}</strong>
-                    <p>${getPlanName(payment.planId)}</p>
-                  </div>
-                  <button class="receipt-thumb-btn" data-preview-receipt="${payment.id}">
-                    <img src="${payment.receiptImage || payment.screenshot}" alt="ქვითარი" class="payment-thumb" />
-                    <span>ქვითრის გახსნა</span>
-                  </button>
-                  <div class="payment-actions">
-                    <button class="primary-btn" data-approve="${payment.id}">დამტკიცება</button>
-                    <button class="secondary-btn" data-deny="${payment.id}">უარყოფა</button>
-                  </div>
-                </article>
-              `)
-              .join("")
-          : `<div class="empty-payments">ამ ეტაპზე ახალი გადახდის მოთხოვნები არ არის.</div>`
-      }
-      </div>
-    </div>
-    `;
-    })()}
-  </section>
-`;
-
-const paymentModalMarkup = () => {
-  if (!state.paymentOpen || !state.currentUser) return "";
-  const plan = planCatalog[state.selectedPlan || "5"] || planCatalog["5"];
-  return `
-    <div class="modal-backdrop">
-      <div class="modal-card">
-        <div class="modal-head">
-          <div>
-            <span class="section-tag premium-lock">აქტივაცია</span>
-            <h3>${plan.name} გეგმის აქტივაცია</h3>
-          </div>
-          <button class="icon-button" id="closePaymentModal">✕</button>
-        </div>
-        <p>${plan.summary}</p>
-        <div class="detail-block">
-          <h4>რა შედის გეგმაში</h4>
-          <ul class="plan-list">
-            ${plan.features.map((feature) => `<li>${feature}</li>`).join("")}
-          </ul>
-        </div>
-        <p>აქტივაციისთვის გთხოვთ გადარიცხოთ <strong>${plan.price}</strong>.</p>
-        <strong>საქართველოს ბანკი (BOG): GE928G0000000612371503</strong>
-        <form id="paymentForm" class="stack-form">
-          <label>
-            <span>გადამხდელის სახელი და გვარი</span>
-            <input name="senderName" type="text" value="${state.currentUser.firstName} ${state.currentUser.lastName}" required />
-          </label>
-          <label class="file-label">
-            <span>ქვითრის ფოტო</span>
-            <input name="screenshot" id="screenshotInput" type="file" accept="image/*" required />
-            <small class="file-chip">ფაილი არჩეული არ არის</small>
-          </label>
-          <button type="submit" class="primary-btn">გაგზავნა</button>
-        </form>
-      </div>
-    </div>
-  `;
-};
-
-const adminModalMarkup = () => {
-  if (!state.adminModalOpen) return "";
-  const selected = state.editAuthorId ? getSelectedEditorData() : null;
-  const selectedWork =
-    state.editAuthorId && state.editWorkId
-      ? selected?.author.works?.[state.editWorkId] || null
-      : null;
-
-  if (state.adminModalMode === "work") {
-    return `
-      <div class="modal-backdrop">
-        <div class="modal-card">
-          <div class="modal-head">
-            <div>
-              <span class="section-tag">${state.editWorkId ? "რედაქტირება" : "ახალი ტექსტი"}</span>
-              <h3>${state.editWorkId ? "ნაწარმოების რედაქტირება" : "ახალი ნაწარმოების დამატება"}</h3>
-            </div>
-            <button class="icon-button" id="closeAdminModal">✕</button>
-          </div>
-          <form id="workForm" class="stack-form">
-            <label>
-              <span>ნაწარმოების სათაური</span>
-              <input name="title" type="text" value="${selectedWork?.title || ""}" required />
-            </label>
-            <button type="submit" class="primary-btn">შენახვა</button>
-          </form>
-        </div>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="modal-backdrop">
-      <div class="modal-card">
-        <div class="modal-head">
-          <div>
-            <span class="section-tag">${state.editAuthorId ? "რედაქტირება" : "ახალი ჩანაწერი"}</span>
-            <h3>${state.editAuthorId ? "ავტორის განახლება" : "ახალი ავტორის დამატება"}</h3>
-          </div>
-          <button class="icon-button" id="closeAdminModal">✕</button>
-        </div>
-        <form id="authorForm" class="stack-form">
-          <label>
-            <span>ავტორის სახელი და გვარი</span>
-            <input name="name" type="text" value="${selected?.author.name || ""}" required />
-          </label>
-          <label>
-            <span>ეპოქა</span>
-            <input name="era" type="text" value="${selected?.author.era || ""}" required />
-          </label>
-          <label>
-            <span>ბიოგრაფია</span>
-            <textarea name="bio" rows="4" required>${selected?.author.bio || ""}</textarea>
-          </label>
-          <label>
-            <span>პორტრეტის URL</span>
-            <input name="portraitUrl" type="text" value="${selected?.author.portrait || ""}" />
-          </label>
-          <label class="file-label">
-            <span>პორტრეტის ატვირთვა</span>
-            <input name="portraitFile" id="portraitInput" type="file" accept="image/*" />
-            <small class="file-chip">ატვირთვა სურვილისამებრ</small>
-          </label>
-          <button type="submit" class="primary-btn">შენახვა</button>
-        </form>
-      </div>
-    </div>
-  `;
-};
-
-const receiptPreviewMarkup = () => {
-  if (!state.receiptPreview) return "";
-  return `
-    <div class="modal-backdrop">
-      <div class="modal-card receipt-modal">
-        <div class="modal-head">
-          <div>
-            <span class="section-tag premium-lock">ქვითრის გადამოწმება</span>
-            <h3>${state.receiptPreview.studentName || `${state.receiptPreview.firstName} ${state.receiptPreview.lastName}`}</h3>
-          </div>
-          <button class="icon-button" id="closeReceiptPreview">✕</button>
-        </div>
-        <div class="receipt-preview-meta">
-          <p><strong>ელ-ფოსტა:</strong> ${state.receiptPreview.studentEmail || state.receiptPreview.email}</p>
-          <p><strong>გეგმა:</strong> ${getPlanName(state.receiptPreview.planId)}</p>
-        </div>
-        <img src="${state.receiptPreview.receiptImage || state.receiptPreview.screenshot}" alt="ქვითარი" class="receipt-preview-image" />
-      </div>
-    </div>
-  `;
-};
-
-const getSelectedEditorData = () => findAuthorById(state.editAuthorId);
-
-const dashboardMarkup = () => `
-  <div class="app-shell">
-    ${navigationMarkup()}
-    <main class="main-shell">
-      ${state.dashboardTab === "library" ? libraryMarkup() : ""}
-      ${state.dashboardTab === "profile" ? profileMarkup() : ""}
-      ${state.dashboardTab === "payments" && isAdmin() ? paymentsMarkup() : ""}
-    </main>
-    ${paymentModalMarkup()}
-    ${adminModalMarkup()}
-    ${receiptPreviewMarkup()}
+    </aside>
   </div>
 `;
 
-const render = () => {
-  refreshSubscriptionStatuses();
-  app.innerHTML = state.route === "landing" ? landingMarkup() : dashboardMarkup();
-  bindEvents();
+const renderAuth = () => `
+  <div class="auth-wrap grid">
+    <section class="auth-card">
+      <span class="pill">${state.authMode === "login" ? "ავტორიზაცია" : "რეგისტრაცია"}</span>
+      <h2>${state.authMode === "login" ? "შესვლა" : "ახალი ანგარიშის შექმნა"}</h2>
+      <p class="lead">თუ ელფოსტა არის <strong>${ADMIN_EMAIL}</strong>, სისტემა ავტომატურად მიანიჭებს Admin როლს.</p>
+      <form id="auth-form">
+        ${state.authMode === "signup" ? `
+          <label class="field">
+            <span>სრული სახელი</span>
+            <input name="fullName" placeholder="მაგ. გიორგი ჯავახიშვილი" required />
+          </label>
+        ` : ""}
+        <label class="field">
+          <span>ელფოსტა</span>
+          <input name="email" type="email" required />
+        </label>
+        <label class="field">
+          <span>პაროლი</span>
+          <input name="password" type="password" minlength="6" required />
+        </label>
+        <div class="actions">
+          <button class="btn gold" type="submit">${state.authMode === "login" ? "შესვლა" : "რეგისტრაცია"}</button>
+          <button class="btn secondary" type="button" data-action="toggle-auth">
+            ${state.authMode === "login" ? "ახალი ანგარიში" : "უკვე მაქვს ანგარიში"}
+          </button>
+        </div>
+      </form>
+    </section>
+    <section class="auth-card">
+      <span class="pill">Firebase Flow</span>
+      <h2>როგორ მუშაობს</h2>
+      <div class="list">
+        <div class="list-item">1. Email/Password ავტორიზაცია Firebase Auth-ით.</div>
+        <div class="list-item">2. პროფილი იქმნება `users` კოლექციაში და ენიჭება `student` ან `admin` როლი.</div>
+        <div class="list-item">3. გადახდის სქრინშოტი იტვირთება Firebase Storage-ში, ხოლო მოთხოვნა ინახება Firestore-ში.</div>
+        <div class="list-item">4. Admin ადასტურებს ან უარყოფს მოთხოვნას რეალურ დროში.</div>
+      </div>
+    </section>
+  </div>
+`;
+
+const renderStudentDashboard = () => {
+  const author = getSelectedAuthor();
+  const work = getSelectedWork();
+  const tabs = work?.tabs || {};
+  const visibleTabs = Object.entries(tabs);
+  const isActive = state.userProfile?.status === "active" || state.userProfile?.role === "admin";
+  const pendingPayment = paymentForUser();
+
+  return `
+    <div class="dashboard">
+      <aside class="panel sidebar">
+        <span class="pill">${escapeHtml(state.userProfile?.role || "student")}</span>
+        <h2>${escapeHtml(state.userProfile?.fullName || state.user?.email || "")}</h2>
+        <p class="meta">${escapeHtml(state.user?.email || "")}</p>
+        <p class="countdown">სტატუსი: ${escapeHtml(state.userProfile?.status || "inactive")}</p>
+        <p class="countdown">დარჩენილი დრო: ${countdownText()}</p>
+        <div class="menu">
+          <button class="active">ბიბლიოთეკა</button>
+          <button data-action="theme-toggle">რეჟიმის შეცვლა</button>
+          <button data-action="logout">გასვლა</button>
+        </div>
+      </aside>
+      <section class="content">
+        ${
+          !isActive
+            ? `
+          <div class="payment-grid">
+            ${packageCatalog
+              .map(
+                (item) => `
+              <article class="card" style="padding:24px;">
+                <span class="pill">${escapeHtml(item.name)}</span>
+                <div class="price">${item.price}₾</div>
+                <p class="meta">${escapeHtml(item.description)}</p>
+                <p class="meta">${item.features.map(escapeHtml).join(" • ")}</p>
+                <button class="btn ${state.selectedPlan === item.id ? "gold" : "secondary"}" data-plan="${item.id}" data-action="select-plan">
+                  ${state.selectedPlan === item.id ? "არჩეულია" : "ამ პაკეტის არჩევა"}
+                </button>
+              </article>
+            `
+              )
+              .join("")}
+          </div>
+          <section class="panel">
+            <span class="pill">გადახდის ინსტრუქცია</span>
+            <h2>გადმორიცხე და ატვირთე სქრინშოტი</h2>
+            <p class="lead">ანგარიშის ნომერი: <strong>${BANK_ACCOUNT}</strong></p>
+            ${
+              pendingPayment
+                ? `<div class="empty">შენი გადახდა უკვე pending სტატუსშია და ადმინისტრატორი ამოწმებს.</div>`
+                : `
+              <form id="payment-form">
+                <label class="field">
+                  <span>არჩეული პაკეტი</span>
+                  <select name="plan">
+                    ${packageCatalog
+                      .map(
+                        (item) =>
+                          `<option value="${item.id}" ${state.selectedPlan === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>სქრინშოტი</span>
+                  <input name="receipt" type="file" accept="image/*" required />
+                </label>
+                <button class="btn gold" type="submit">ატვირთვა და გაგზავნა</button>
+              </form>
+            `
+            }
+          </section>
+        `
+            : `
+          <section class="panel">
+            <span class="pill">აქტიური წვდომა</span>
+            <h2>ქართული ლიტერატურის ბიბლიოთეკა</h2>
+            <p class="lead">შენი აბონემენტი აქტიურია ${formatDate(state.userProfile?.subscriptionExpiresAt)}-მდე.</p>
+            <div class="library-grid">
+              ${state.authors
+                .map(
+                  (item) => `
+                <article class="author-card">
+                  <span class="pill subtle">${escapeHtml(item.era || "ავტორი")}</span>
+                  <h3>${escapeHtml(item.name)}</h3>
+                  <p class="meta">${escapeHtml(item.bio)}</p>
+                  <button class="btn secondary" data-author="${item.id}" data-action="open-author">გახსნა</button>
+                </article>
+              `
+                )
+                .join("")}
+            </div>
+          </section>
+          ${
+            author && work
+              ? `
+            <section class="content-grid">
+              <article class="panel">
+                <span class="pill">${escapeHtml(author.name)}</span>
+                <h2>${escapeHtml(work.title)}</h2>
+                <p class="lead">${escapeHtml(author.bio)}</p>
+                <div class="tab-row">
+                  ${visibleTabs
+                    .map(
+                      ([key, tab]) => `
+                    <button class="tab ${state.selectedTab === key ? "active" : ""}" data-tab="${key}" data-action="select-tab">${escapeHtml(tab.label)}</button>
+                  `
+                    )
+                    .join("")}
+                </div>
+                <div class="work-body">${tabs[state.selectedTab]?.content || ""}</div>
+              </article>
+              <article class="panel">
+                <span class="pill">ნაწარმოებები</span>
+                <div class="list">
+                  ${author.works
+                    .map(
+                      (item) => `
+                    <div class="list-item">
+                      <h3>${escapeHtml(item.title)}</h3>
+                      <div class="inline-actions">
+                        <button class="btn secondary" data-work="${item.id}" data-action="open-work">გახსნა</button>
+                      </div>
+                    </div>
+                  `
+                    )
+                    .join("")}
+                </div>
+                ${
+                  canSeeQuizzes()
+                    ? `
+                  <div style="margin-top:18px;">
+                    <span class="pill">ქვიზები</span>
+                    <div class="list" style="margin-top:12px;">
+                      ${(work.quizzes || [])
+                        .map(
+                          (quiz, index) => `
+                        <div class="list-item">
+                          <strong>${index + 1}. ${escapeHtml(quiz.question)}</strong>
+                          <p class="meta">${(quiz.options || []).map(escapeHtml).join(" • ")}</p>
+                        </div>
+                      `
+                        )
+                        .join("") || `<div class="empty">ამ ნაწარმოებს ქვიზები ჯერ არ აქვს დამატებული.</div>`}
+                    </div>
+                  </div>
+                `
+                    : `
+                  <div class="empty" style="margin-top:18px;">ქვიზები ხელმისაწვდომია მხოლოდ 10 ლარიან პაკეტში.</div>
+                `
+                }
+              </article>
+            </section>
+          `
+              : ""
+          }
+        `
+        }
+      </section>
+    </div>
+  `;
 };
 
-const bindEvents = () => {
-  document.querySelectorAll("[data-auth]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.authMode = button.dataset.auth;
-      render();
-    });
-  });
+const renderAdmin = () => {
+  const pendingPayments = state.payments.filter((item) => item.status === "pending");
+  return `
+    <div class="dashboard">
+      <aside class="panel sidebar">
+        <span class="pill">Admin</span>
+        <h2>${escapeHtml(state.userProfile?.fullName || "ადმინისტრატორი")}</h2>
+        <p class="meta">${escapeHtml(state.user?.email || "")}</p>
+        <div class="menu">
+          <button class="active">ადმინ პანელი</button>
+          <button data-action="seed">Seed კონტენტის ჩატვირთვა</button>
+          <button data-action="theme-toggle">რეჟიმის შეცვლა</button>
+          <button data-action="logout">გასვლა</button>
+        </div>
+      </aside>
+      <section class="content admin-grid">
+        <article class="panel">
+          <span class="pill">მომხმარებლების მართვა</span>
+          <h2>Pending გადახდები</h2>
+          <div class="list">
+            ${
+              pendingPayments.length
+                ? pendingPayments
+                    .map(
+                      (payment) => `
+                  <div class="list-item">
+                    <strong>${escapeHtml(payment.userName || payment.userEmail)}</strong>
+                    <p class="meta">${escapeHtml(payment.planName)} • ${payment.price}₾ • ${formatDate(payment.createdAt?.toDate?.() || payment.createdAt)}</p>
+                    <img class="payment-proof" src="${escapeHtml(payment.receiptUrl)}" alt="receipt" />
+                    <div class="inline-actions" style="margin-top:12px;">
+                      <button class="btn gold" data-payment="${payment.id}" data-action="approve-payment">დადასტურება</button>
+                      <button class="btn warn" data-payment="${payment.id}" data-action="reject-payment">უარყოფა</button>
+                    </div>
+                  </div>
+                `
+                    )
+                    .join("")
+                : `<div class="empty">ამ ეტაპზე pending გადახდები არ არის.</div>`
+            }
+          </div>
+        </article>
+        <article class="panel">
+          <span class="pill">კონტენტის მართვა</span>
+          <h2>ავტორისა და ნაწარმოების დამატება</h2>
+          <form id="author-form">
+            <label class="field"><span>Author ID</span><input name="id" required /></label>
+            <label class="field"><span>სახელი</span><input name="name" required /></label>
+            <label class="field"><span>ეპოქა</span><input name="era" required /></label>
+            <label class="field"><span>ბიოგრაფია</span><textarea name="bio" required></textarea></label>
+            <button class="btn gold" type="submit">ავტორის დამატება</button>
+          </form>
+          <hr style="border:none;border-top:1px solid var(--line);margin:22px 0;" />
+          <form id="work-form">
+            <label class="field"><span>Author ID</span><input name="authorId" required /></label>
+            <label class="field"><span>Work ID</span><input name="workId" required /></label>
+            <label class="field"><span>სათაური</span><input name="title" required /></label>
+            <label class="field"><span>შინაარსი</span><textarea name="summary" required></textarea></label>
+            <label class="field"><span>განხილვა</span><textarea name="analysis" required></textarea></label>
+            <label class="field"><span>დახასიათება</span><textarea name="characters" required></textarea></label>
+            <label class="field"><span>გეგმა</span><textarea name="plan" required></textarea></label>
+            <label class="field"><span>ციტატები</span><textarea name="quotes" required></textarea></label>
+            <label class="field"><span>ქვიზები JSON-ად</span><textarea name="quizzes" placeholder='[{"question":"...","options":["A","B"],"answerIndex":0}]'></textarea></label>
+            <button class="btn gold" type="submit">ნაწარმოების დამატება</button>
+          </form>
+        </article>
+      </section>
+    </div>
+  `;
+};
 
-  const signupForm = document.querySelector("#signupForm");
-  if (signupForm) signupForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    handleSignup(new FormData(signupForm));
-  });
+const renderApp = () => {
+  const topbar = `
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">მით<span class="logo-o"></span>სი</div>
+        <div class="brand-copy">
+          <strong>Mitosi</strong><br />
+          <small>Modern Minimalist Library</small>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn secondary" data-action="theme-toggle">${document.body.classList.contains("dark") ? "Light Mode" : "Dark Mode"}</button>
+        ${
+          state.user
+            ? `<button class="btn secondary" data-action="logout">გასვლა</button>`
+            : `<button class="btn secondary" data-action="go-auth">ავტორიზაცია</button>`
+        }
+      </div>
+    </header>
+  `;
 
-  const loginForm = document.querySelector("#loginForm");
-  if (loginForm) loginForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    handleLogin(new FormData(loginForm));
-  });
+  if (state.bootError) {
+    appRoot.innerHTML = `${topbar}<section class="panel" style="margin-top:18px;"><h2>Firebase Setup საჭიროა</h2><p class="lead">${escapeHtml(state.bootError)}</p></section>`;
+    return;
+  }
 
-  document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.dashboardTab = button.dataset.tab;
-      render();
-    });
-  });
+  const body =
+    !state.user
+      ? `${renderLanding()}<div style="margin-top:20px;">${renderAuth()}</div>`
+      : state.userProfile?.role === "admin"
+        ? renderAdmin()
+        : renderStudentDashboard();
 
-  const logoutBtn = document.querySelector("#logoutBtn");
-  if (logoutBtn) logoutBtn.addEventListener("click", signOut);
+  appRoot.innerHTML = `${topbar}${body}<p class="footer-note">Mitosi • Firebase Auth + Firestore + Storage + Hosting-ready</p>`;
+};
 
-  document.querySelectorAll("[data-open-author]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const authorId = button.dataset.openAuthor;
-      if (!authorId) return;
-      openAuthorDetail(authorId);
-    });
-  });
+const attachEvents = () => {
+  document.querySelector("#auth-form")?.addEventListener("submit", handleAuth);
+  document.querySelector("#payment-form")?.addEventListener("submit", handlePaymentUpload);
+  document.querySelector("#author-form")?.addEventListener("submit", handleAuthorCreate);
+  document.querySelector("#work-form")?.addEventListener("submit", handleWorkCreate);
 
-  document.querySelectorAll("[data-open-work]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const [authorId, workId] = button.dataset.openWork.split("|");
-      if (!authorId || !workId) return;
-      openWorkEditor(authorId, workId);
-    });
-  });
-
-  document.querySelectorAll("[data-open-student-work]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const [authorId, workId] = button.dataset.openStudentWork.split("|");
-      openWork(authorId, workId);
-    });
-  });
-
-  document.querySelectorAll("[data-back-authors]").forEach((button) => {
-    button.addEventListener("click", openAuthorsDirectory);
-  });
-
-  document.querySelectorAll("[data-back-author]").forEach((button) => {
-    button.addEventListener("click", () => openAuthorDetail(state.selectedAuthorId));
-  });
-
-  const closePaywall = document.querySelector("#closePaywall");
-  if (closePaywall) closePaywall.addEventListener("click", () => {
-    state.paywallOpen = false;
-    render();
-  });
-
-  const openPaymentModal = document.querySelector("#openPaymentModal");
-  if (openPaymentModal) openPaymentModal.addEventListener("click", () => {
-    state.selectedPlan = "5";
-    state.paymentOpen = true;
-    render();
-  });
-
-  const openPaymentFromProfile = document.querySelector("#openPaymentFromProfile");
-  if (openPaymentFromProfile) openPaymentFromProfile.addEventListener("click", () => {
-    state.selectedPlan = "5";
-    state.paymentOpen = true;
-    render();
-  });
-
-  const openPaymentFromHeader = document.querySelector("#openPaymentFromHeader");
-  if (openPaymentFromHeader) openPaymentFromHeader.addEventListener("click", () => {
-    state.selectedPlan = "5";
-    state.paymentOpen = true;
-    render();
-  });
-
-  document.querySelectorAll("[data-open-plan]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedPlan = button.dataset.openPlan || "5";
-      if (!state.currentUser) {
-        state.authMode = "signup";
-        alert("გამოწერისთვის ჯერ შექმენი ანგარიში ან გაიარე ავტორიზაცია.");
-        render();
-        return;
+  appRoot.querySelectorAll("[data-action]").forEach((element) => {
+    element.addEventListener("click", async () => {
+      const { action, author, work, tab, payment, plan } = element.dataset;
+      if (action === "go-auth") {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
       }
-      state.paymentOpen = true;
-      render();
+      if (action === "toggle-auth") {
+        state.authMode = state.authMode === "login" ? "signup" : "login";
+        render();
+      }
+      if (action === "theme-toggle") {
+        setTheme(document.body.classList.contains("dark") ? "light" : "dark");
+        render();
+      }
+      if (action === "logout") {
+        await signOut(auth);
+      }
+      if (action === "open-author") {
+        state.selectedAuthorId = author;
+        state.selectedWorkId = state.authors.find((item) => item.id === author)?.works?.[0]?.id || null;
+        state.selectedTab = "summary";
+        render();
+      }
+      if (action === "open-work") {
+        state.selectedWorkId = work;
+        state.selectedTab = "summary";
+        render();
+      }
+      if (action === "select-tab") {
+        state.selectedTab = tab;
+        render();
+      }
+      if (action === "select-plan") {
+        state.selectedPlan = plan;
+        render();
+      }
+      if (action === "approve-payment") {
+        const found = state.payments.find((item) => item.id === payment);
+        if (found) await approvePayment(found);
+      }
+      if (action === "reject-payment") {
+        const found = state.payments.find((item) => item.id === payment);
+        if (found) await rejectPayment(found);
+      }
+      if (action === "seed") {
+        await ensureSeedData();
+      }
     });
   });
+};
 
-  const closePaymentModal = document.querySelector("#closePaymentModal");
-  if (closePaymentModal) closePaymentModal.addEventListener("click", () => {
-    state.paymentOpen = false;
-    render();
-  });
+const render = () => {
+  renderApp();
+  attachEvents();
+};
 
-  const paymentForm = document.querySelector("#paymentForm");
-  if (paymentForm) {
-    paymentForm.addEventListener("submit", submitPayment);
-    const screenshotInput = paymentForm.querySelector("#screenshotInput");
-    if (screenshotInput) {
-      screenshotInput.addEventListener("change", () => handleFileChange(screenshotInput, paymentForm));
+const boot = async () => {
+  initTheme();
+  render();
+  if (!auth) return;
+
+  await ensureSeedData();
+  subscribeAppData();
+
+  onAuthStateChanged(auth, async (firebaseUser) => {
+    state.authReady = true;
+    state.user = firebaseUser;
+
+    if (!firebaseUser) {
+      state.userProfile = null;
+      render();
+      return;
     }
-  }
 
-  document.querySelectorAll("[data-approve]").forEach((button) => {
-    button.addEventListener("click", () => approvePayment(Number(button.dataset.approve), "premium"));
-  });
-
-  document.querySelectorAll("[data-deny]").forEach((button) => {
-    button.addEventListener("click", () => approvePayment(Number(button.dataset.deny), "free"));
-  });
-
-  const openNewAuthorModal = document.querySelector("#openNewAuthorModal");
-  if (openNewAuthorModal) openNewAuthorModal.addEventListener("click", () => openAdminEditor("author"));
-
-  document.querySelectorAll("[data-edit-author]").forEach((button) => {
-    button.addEventListener("click", () => openAdminEditor("author", button.dataset.editAuthor));
-  });
-
-  document.querySelectorAll("[data-add-work]").forEach((button) => {
-    button.addEventListener("click", () => openAdminEditor("work", button.dataset.addWork));
-  });
-
-  document.querySelectorAll("[data-preview-receipt]").forEach((button) => {
-    button.addEventListener("click", () => previewReceipt(Number(button.dataset.previewReceipt)));
-  });
-
-  const closeAdminModal = document.querySelector("#closeAdminModal");
-  if (closeAdminModal) closeAdminModal.addEventListener("click", () => {
-    closeAdminModalState();
-    render();
-  });
-
-  const authorForm = document.querySelector("#authorForm");
-  if (authorForm) {
-    authorForm.addEventListener("submit", saveAuthor);
-    const portraitInput = authorForm.querySelector("#portraitInput");
-    if (portraitInput) {
-      portraitInput.addEventListener("change", () => handleFileChange(portraitInput, authorForm));
-    }
-  }
-
-  const workForm = document.querySelector("#workForm");
-  if (workForm) workForm.addEventListener("submit", saveWork);
-
-  const chapterForm = document.querySelector("#chapterForm");
-  if (chapterForm) chapterForm.addEventListener("submit", addNewChapter);
-
-  const characterForm = document.querySelector("#characterForm");
-  if (characterForm) characterForm.addEventListener("submit", addNewCharacter);
-
-  const closeReceiptPreviewBtn = document.querySelector("#closeReceiptPreview");
-  if (closeReceiptPreviewBtn) closeReceiptPreviewBtn.addEventListener("click", () => {
-    closeReceiptPreview();
+    await ensureUserProfile(firebaseUser);
+    const snapshot = await getDoc(doc(db, "users", firebaseUser.uid));
+    state.userProfile = snapshot.exists() ? await syncExpiryIfNeeded(snapshot.data()) : null;
     render();
   });
 };
 
-initState();
-render();
-subscribeToCurriculum();
-subscribeToPendingPayments();
+boot();
