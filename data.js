@@ -85,7 +85,7 @@ export const seedAuthors = [
   { id: "rcheulishvili", name: "გურამ რჩეულიშვილი", era: "მე-20 სს.", bio: "ახალი თაობის თავისუფალი პროზის ავტორი.", works: [makeWork("alaverdoba", "ალავერდობა")] },
   { id: "kalandadze", name: "ანა კალანდაძე", era: "თანამედროვე", bio: "ლირიკული ინტონაციის გამორჩეული პოეტი.", works: [makeWork("poems", "რჩეული ლექსები")] },
   { id: "qarchkhadze", name: "ჯემალ ქარჩხაძე", era: "თანამედროვე", bio: "ფილოსოფიური პროზისა და ძლიერი სიუჟეტური ქსოვილის ავტორი.", works: [makeWork("igi", "იგი")] },
-  { id: "dochanashvili", name: "გურამ დოჩანაშვილი", era: "თანამედროვე", bio: "თბილი ირონიის, ჰუმანიზმისა და ინტელექტუალური თამაშის გამორჩეული პროზაიკოსი.", works: [makeWork("kaci-romelsac-literatura", "კაცი, რომელსაც ლიტერატურა ძლიერ უყვარდა")] },
+  { id: "dochanashvili", name: "გოდერძი ჩოხელი / ოტარ ჭილაძე / გურამ დოჩანაშვილი", era: "თანამედროვე", bio: "ამ ჩანაწერში შეგიძლია ადმინისტრაციულად ჩაანაცვლო ან დააზუსტო მოთხოვნილი თანამედროვე ავტორი.", works: [makeWork("kaci-romelsac-literatura", "კაცი, რომელსაც ლიტერატურა ძლიერ უყვარდა")] },
 ];
 
 export const defaultFirebaseConfig = {
